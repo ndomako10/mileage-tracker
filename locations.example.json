@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Home",
+    "abbreviation": "Home",
+    "type": "home",
+    "lat": 44.0000000,
+    "lon": -84.0000000,
+    "street": "123 Your Street",
+    "city": "Your City",
+    "state": "MI"
+  },
+  {
+    "name": "Work",
+    "abbreviation": "Work",
+    "type": "work",
+    "lat": 43.0000000,
+    "lon": -85.0000000,
+    "street": "456 Work Street",
+    "city": "Work City",
+    "state": "MI"
+  }
+]

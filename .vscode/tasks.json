@@ -1,0 +1,63 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Rename Photos (Dry Run)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NonInteractive",
+        "-File",
+        "${workspaceFolder}\\Rename-Photos.ps1",
+        "-DryRun"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Rename Photos",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NonInteractive",
+        "-File",
+        "${workspaceFolder}\\Rename-Photos.ps1"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Trips",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NonInteractive",
+        "-File",
+        "${workspaceFolder}\\Build-Trips.ps1"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
