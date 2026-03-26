@@ -1,0 +1,22 @@
+# Local configuration — copy from *.example.json and fill in your values
+settings.json
+settings.local.json
+locations.json
+
+# Generated output — not committed
+rename-log.json
+rename-log.csv
+trips.csv
+
+# ExifTool binary — download from https://exiftool.org/
+exiftool-13.53_64/
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editors
+.vscode/settings.json
+*.tmp
+*.bak

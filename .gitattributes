@@ -1,0 +1,18 @@
+# Default: normalize line endings on checkin, use platform endings on checkout
+* text=auto
+
+# PowerShell — CRLF on all platforms
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.psd1  text eol=crlf
+*.ps1xml text eol=crlf
+
+# Structured text — LF everywhere
+*.json  text eol=lf
+*.md    text eol=lf
+*.csv   text eol=lf
+
+# Binaries — no line-ending conversion, no diff
+*.exe   binary
+*.dll   binary
+*.pl    binary

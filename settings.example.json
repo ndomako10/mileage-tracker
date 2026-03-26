@@ -1,0 +1,7 @@
+{
+  "Folder": "C:\\Users\\YourName\\OneDrive\\Mileage\\Odometer",
+  "LocationsJson": "locations.json",
+  "ExifToolPath": "exiftool-13.53_64\\exiftool.exe",
+  "ProximityThresholdMiles": 1.0,
+  "MaxTripMiles": 250
+}
