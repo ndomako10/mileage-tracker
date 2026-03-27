@@ -173,7 +173,12 @@ if (-not (Test-Path $settingsFile)) {
     Write-Error "settings.json not found: $settingsFile"
     exit 1
 }
-$s = Get-Content $settingsFile -Raw | ConvertFrom-Json
+try {
+    $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
+} catch {
+    Write-Error "settings.json is not valid JSON ($settingsFile): $($_.Exception.Message)"
+    exit 1
+}
 $settings = @{}
 $s.PSObject.Properties | ForEach-Object { $settings[$_.Name] = $_.Value }
 $paths = if ($s.PSObject.Properties['Paths']) { $s.Paths } else { $null }
@@ -195,20 +200,26 @@ if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolP
 if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
 if (-not $PSBoundParameters.ContainsKey('MaxTripMiles'))            { $MaxTripMiles            = [int]$settings['MaxTripMiles'] }
 
-if (-not (Test-Path $Folder)) {
-    Write-Error "Folder not found: $Folder"
-    exit 1
-}
-if (-not (Test-Path $LocationsJson)) {
-    Write-Error "locations.json not found: $LocationsJson"
-    exit 1
-}
-if (-not (Test-Path $ExifToolPath)) {
-    Write-Error "exiftool not found: $ExifToolPath"
+$configErrors = @()
+if (-not $Folder)                     { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
+elseif (-not (Test-Path $Folder))     { $configErrors += "Source folder not found: $Folder" }
+if (-not (Test-Path $LocationsJson))  { $configErrors += "locations.json not found: $LocationsJson" }
+if (-not (Test-Path $ExifToolPath))   { $configErrors += "ExifTool not found: $ExifToolPath" }
+if ($configErrors.Count -gt 0) {
+    $configErrors | ForEach-Object { Write-Error $_ }
     exit 1
 }
 
-$locations = Get-Content $LocationsJson -Raw | ConvertFrom-Json
+try {
+    $locations = Get-Content $LocationsJson -Raw | ConvertFrom-Json
+} catch {
+    Write-Error "locations.json is not valid JSON ($LocationsJson): $($_.Exception.Message)"
+    exit 1
+}
+if (@($locations).Count -eq 0) {
+    Write-Error "locations.json must contain at least one entry: $LocationsJson"
+    exit 1
+}
 
 $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths.Output) {
     $paths.Output
