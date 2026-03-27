@@ -31,21 +31,19 @@
     Maximum plausible miles for a single trip. OCR readings that exceed the previous known-good
     odometer by more than (gaps + 1) * MaxTripMiles are flagged as suspect.
 
-.PARAMETER DryRun
-    Preview renames without making changes.
-
 .EXAMPLE
-    .\Rename-Photos.ps1 -DryRun
+    .\Rename-Photos.ps1 -WhatIf
     .\Rename-Photos.ps1
-    .\Rename-Photos.ps1 -Folder "D:\Photos\Odometer" -DryRun
+    .\Rename-Photos.ps1 -Folder "D:\Photos\Odometer" -WhatIf
+    .\Rename-Photos.ps1 -Confirm
 #>
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Folder                  = "",
     [string]$LocationsJson           = "$PSScriptRoot\..\config\locations.json",
     [string]$ExifToolPath            = "$PSScriptRoot\..\exiftool-13.53_64\exiftool.exe",
     [double]$ProximityThresholdMiles = 1.0,
-    [int]$MaxTripMiles               = 250,
-    [switch]$DryRun
+    [int]$MaxTripMiles               = 250
 )
 
 Set-StrictMode -Version Latest
@@ -345,27 +343,23 @@ foreach ($file in $photos) {
         $counter++
     }
 
-    # --- Rename (or dry-run) --------------------------------------------
-    if ($DryRun) {
-        Write-Host "  [DRY RUN] $($file.Name) -> $newName"
-    }
-    else {
+    # --- Rename and log -------------------------------------------------
+    if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName")) {
         Rename-Item -Path $file.FullName -NewName $newName
         Write-Host "  Renamed -> $newName"
-    }
 
-    # --- Log ------------------------------------------------------------
-    $logEntries += [PSCustomObject]@{
-        OriginalFile       = $file.Name
-        NewFile            = $newName
-        DateTimeOriginal   = $dateTimeRaw
-        Location           = $locationName
-        Odometer           = $ocr.Reading
-        OdometerConfidence = $ocr.Confidence
-        GPSLat             = $gpsLat
-        GPSLon             = $gpsLon
+        $logEntries += [PSCustomObject]@{
+            OriginalFile       = $file.Name
+            NewFile            = $newName
+            DateTimeOriginal   = $dateTimeRaw
+            Location           = $locationName
+            Odometer           = $ocr.Reading
+            OdometerConfidence = $ocr.Confidence
+            GPSLat             = $gpsLat
+            GPSLon             = $gpsLon
+        }
+        $logEntries | ConvertTo-Json | Out-File $logFile -Encoding utf8
     }
-    $logEntries | ConvertTo-Json | Out-File $logFile -Encoding utf8
 }
 
 Write-Host ""

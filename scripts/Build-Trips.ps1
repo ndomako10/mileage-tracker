@@ -31,7 +31,9 @@
 .EXAMPLE
     .\Build-Trips.ps1
     .\Build-Trips.ps1 -RoadFactor 1.30 -TolerancePct 0.25
+    .\Build-Trips.ps1 -WhatIf
 #>
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Folder          = "",
     [string]$LocationsJson   = "$PSScriptRoot\..\config\locations.json",
@@ -368,22 +370,24 @@ if ($null -ne $pending) {
     }
 }
 
-# Export CSV
-$trips | Export-Csv -Path $tripsOut -NoTypeInformation -Encoding utf8
-
 # Summary
 $auto     = ($trips | Where-Object { $_.Status -eq "auto"     }).Count
 $review   = ($trips | Where-Object { $_.Status -eq "review"   }).Count
 $unpaired = ($trips | Where-Object { $_.Status -eq "unpaired" }).Count
 $stops    = ($trips | Where-Object { $_.Status -eq "stop"     }).Count
 
-Write-Host ""
-Write-Host "Trips written to: $tripsOut"
 Write-Host "  Auto-matched : $auto"
 Write-Host "  Needs review : $review"
 Write-Host "  Unpaired     : $unpaired"
 Write-Host "  Stops (ref)  : $stops"
-if ($review -gt 0 -or $unpaired -gt 0) {
+
+# Export CSV
+if ($PSCmdlet.ShouldProcess($tripsOut, "Write trips CSV")) {
+    $trips | Export-Csv -Path $tripsOut -NoTypeInformation -Encoding utf8
     Write-Host ""
-    Write-Host "Open trips.csv and manually complete rows where Status = 'review' or 'unpaired'."
+    Write-Host "Trips written to: $tripsOut"
+    if ($review -gt 0 -or $unpaired -gt 0) {
+        Write-Host ""
+        Write-Host "Open trips.csv and manually complete rows where Status = 'review' or 'unpaired'."
+    }
 }
