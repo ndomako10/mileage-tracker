@@ -46,11 +46,17 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # Load settings.json — values override param defaults; explicit args win
 # ---------------------------------------------------------------------------
+$paths = $null
 $settingsPath = Join-Path $PSScriptRoot ".." "config" "settings.json"
 if (Test-Path $settingsPath) {
     $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (-not $PSBoundParameters.ContainsKey('Folder') -and $cfg.Folder) {
-        $Folder = $cfg.Folder
+    $paths = if ($cfg.PSObject.Properties['Paths']) { $cfg.Paths } else { $null }
+    if (-not $PSBoundParameters.ContainsKey('Folder')) {
+        if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
+            $Folder = $paths.Source
+        } elseif ($cfg.Folder) {
+            $Folder = $cfg.Folder
+        }
     }
     if (-not $PSBoundParameters.ContainsKey('LocationsJson') -and $cfg.LocationsJson) {
         $LocationsJson = if ([System.IO.Path]::IsPathRooted($cfg.LocationsJson)) {
@@ -122,8 +128,11 @@ function Format-TripDate {
 # Main
 # ---------------------------------------------------------------------------
 
-$logFile  = Join-Path $Folder "rename-log.csv"
-$tripsOut = Join-Path $Folder "trips.csv"
+$reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.Reports) {
+    $paths.Reports
+} else { $Folder }
+$logFile  = Join-Path $reportsDir "rename-log.csv"
+$tripsOut = Join-Path $reportsDir "trips.csv"
 
 if (-not (Test-Path $logFile)) {
     Write-Error "rename-log.csv not found. Run Rename-Photos.ps1 first: $logFile"
