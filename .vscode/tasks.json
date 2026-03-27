@@ -8,7 +8,7 @@
       "args": [
         "-NonInteractive",
         "-File",
-        "${workspaceFolder}\\Rename-Photos.ps1",
+        "${workspaceFolder}\\scripts\\Rename-Photos.ps1",
         "-DryRun"
       ],
       "group": "build",
@@ -28,7 +28,7 @@
       "args": [
         "-NonInteractive",
         "-File",
-        "${workspaceFolder}\\Rename-Photos.ps1"
+        "${workspaceFolder}\\scripts\\Rename-Photos.ps1"
       ],
       "group": "build",
       "presentation": {
@@ -47,7 +47,7 @@
       "args": [
         "-NonInteractive",
         "-File",
-        "${workspaceFolder}\\Build-Trips.ps1"
+        "${workspaceFolder}\\scripts\\Build-Trips.ps1"
       ],
       "group": "build",
       "presentation": {

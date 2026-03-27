@@ -34,7 +34,7 @@
 #>
 param(
     [string]$Folder          = "",
-    [string]$LocationsJson   = "$PSScriptRoot\locations.json",
+    [string]$LocationsJson   = "$PSScriptRoot\..\config\locations.json",
     [double]$RoadFactor             = 1.25,
     [double]$TolerancePct           = 0.20,
     [int]   $DuplicateWindowSeconds = 120
@@ -46,7 +46,7 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # Load settings.json — values override param defaults; explicit args win
 # ---------------------------------------------------------------------------
-$settingsPath = Join-Path $PSScriptRoot "settings.json"
+$settingsPath = Join-Path $PSScriptRoot ".." "config" "settings.json"
 if (Test-Path $settingsPath) {
     $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if (-not $PSBoundParameters.ContainsKey('Folder') -and $cfg.Folder) {
@@ -56,7 +56,7 @@ if (Test-Path $settingsPath) {
         $LocationsJson = if ([System.IO.Path]::IsPathRooted($cfg.LocationsJson)) {
             $cfg.LocationsJson
         } else {
-            Join-Path $PSScriptRoot $cfg.LocationsJson
+            Join-Path (Split-Path $settingsPath -Parent) $cfg.LocationsJson
         }
     }
     if (-not $PSBoundParameters.ContainsKey('RoadFactor') -and $null -ne $cfg.RoadFactor) {

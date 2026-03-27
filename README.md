@@ -48,15 +48,15 @@ trips.csv                               ← ready for Excel import or manual com
 
 ## Setup
 
-1. Copy `settings.example.json` → `settings.json` and set your photo folder path and other preferences.
-2. Copy `locations.example.json` → `locations.json` and add your known locations.
-3. Download [ExifTool for Windows](https://exiftool.org/) and place `exiftool.exe` at the path specified in `settings.json`.
+1. Copy `config/settings.example.json` → `config/settings.json` and set your photo folder path and other preferences.
+2. Copy `config/locations.example.json` → `config/locations.json` and add your known locations.
+3. Download [ExifTool for Windows](https://exiftool.org/) and place `exiftool.exe` at the path specified in `config/settings.json`.
 
 ---
 
 ## Configuration
 
-All settings live in **`settings.json`** (copy from `settings.example.json`). Command-line parameters
+All settings live in **`config/settings.json`** (copy from `config/settings.example.json`). Command-line parameters
 override `settings.json` values; `settings.json` values override script defaults.
 
 | Key | Default | Description |
@@ -76,13 +76,13 @@ override `settings.json` values; `settings.json` values override script defaults
 
 ```powershell
 # Step 1 — preview renames (no changes made)
-.\Rename-Photos.ps1 -DryRun
+.\scripts\Rename-Photos.ps1 -DryRun
 
 # Step 1 — rename photos
-.\Rename-Photos.ps1
+.\scripts\Rename-Photos.ps1
 
 # Step 2 — build trip pairs
-.\Build-Trips.ps1
+.\scripts\Build-Trips.ps1
 ```
 
 Open `trips.csv` and review any rows where `Status` is `review` or `unpaired`.
@@ -127,7 +127,7 @@ Coordinates can be sourced from Google Maps, Google Plus Codes, or photo GPS met
 }
 ```
 
-See `locations.example.json` for a full template.
+See `config/locations.example.json` for a full template.
 
 GPS proximity threshold is controlled by `ProximityThresholdMiles` in `settings.json` (default: **1.0 mile**).
 If a photo's GPS does not match any location within the threshold, the location is set to `Unknown`
@@ -227,10 +227,10 @@ Straight-line distance = ExpectedMiles / RoadFactor
 Best road factor = mean(odometer delta / straight-line distance) across confirmed trips
 ```
 
-Update `RoadFactor` in `settings.json` accordingly, or override at runtime:
+Update `RoadFactor` in `config/settings.json` accordingly, or override at runtime:
 
 ```powershell
-.\Build-Trips.ps1 -RoadFactor 1.30 -TolerancePct 0.25
+.\scripts\Build-Trips.ps1 -RoadFactor 1.30 -TolerancePct 0.25
 ```
 
 ---

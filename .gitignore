@@ -1,11 +1,11 @@
-# Local configuration — copy from *.example.json and fill in your values
-settings.json
-settings.local.json
-locations.json
+# Local configuration — copy from config/*.example.json and fill in your values
+config/settings.json
+config/settings.local.json
+config/locations.json
 
 # Generated output — not committed
-rename-log.json
-rename-log.csv
+logs/rename-log.json
+logs/rename-log.csv
 trips.csv
 
 # ExifTool binary — download from https://exiftool.org/

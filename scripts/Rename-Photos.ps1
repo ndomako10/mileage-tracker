@@ -10,7 +10,7 @@
       4. Extracts the odometer reading via Windows OCR
       5. Validates the reading against the previous known-good odometer value
       6. Renames the file: yyMMdd-hhmm Location Odometer.jpg
-      7. Appends an entry to rename-log.json (beside this script)
+      7. Appends an entry to rename-log.json (in the repo root)
 
     Default values are loaded from settings.json beside this script.
     Any parameter passed on the command line overrides the corresponding setting.
@@ -168,7 +168,7 @@ function Get-OdometerReading {
 # ---------------------------------------------------------------------------
 # Load settings.json; command-line params take precedence over file values
 # ---------------------------------------------------------------------------
-$settingsFile = Join-Path $PSScriptRoot "settings.json"
+$settingsFile = Join-Path $PSScriptRoot ".." "config" "settings.json"
 if (-not (Test-Path $settingsFile)) {
     Write-Error "settings.json not found: $settingsFile"
     exit 1
@@ -181,7 +181,7 @@ function Resolve-RelativeSetting {
     param([string]$Key)
     $raw = $settings[$Key]
     if ([System.IO.Path]::IsPathRooted($raw)) { return $raw }
-    return Join-Path $PSScriptRoot $raw
+    return Join-Path (Split-Path $settingsFile -Parent) $raw
 }
 
 if (-not $PSBoundParameters.ContainsKey('Folder'))                  { $Folder                  = $settings['Folder'] }
@@ -204,7 +204,7 @@ if (-not (Test-Path $ExifToolPath)) {
 }
 
 $locations = Get-Content $LocationsJson -Raw | ConvertFrom-Json
-$logFile   = Join-Path $PSScriptRoot "rename-log.json"
+$logFile   = Join-Path $PSScriptRoot ".." "logs" "rename-log.json"
 
 $logEntries       = @()
 $lastOdometer     = $null
