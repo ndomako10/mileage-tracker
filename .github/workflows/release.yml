@@ -48,7 +48,8 @@ jobs:
         if: steps.bump.outputs.bump != 'none'
         id: next_version
         run: |
-          VERSION="${{ steps.latest_tag.outputs.tag }#v}"
+          RAW_TAG="${{ steps.latest_tag.outputs.tag }}"
+          VERSION="${RAW_TAG#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
           case "${{ steps.bump.outputs.bump }}" in
