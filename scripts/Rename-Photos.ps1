@@ -232,6 +232,17 @@ $reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.
 } else { Join-Path $PSScriptRoot ".." "logs" }
 $logFile = Join-Path $reportsDir "rename-log.json"
 
+$logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
+    $paths.Logs
+} else { Join-Path $PSScriptRoot ".." "logs" }
+if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
+$transcriptPath = Join-Path $logsDir "rename-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+Start-Transcript -Path $transcriptPath -Append | Out-Null
+
+Write-Information "[Rename-Photos] Starting — source: $Folder" -InformationAction Continue
+
+try {
+
 $logEntries       = @()
 $lastOdometer     = $null
 $gapSinceLastGood = 0
@@ -254,7 +265,7 @@ if (Test-Path $logFile) {
 
 $photos = Get-ChildItem -Path $Folder -Filter "IMG_*.jpg"
 if ($photos.Count -eq 0) {
-    Write-Host "No IMG_*.jpg files found in $Folder"
+    Write-Information "No IMG_*.jpg files found in $Folder" -InformationAction Continue
     exit 0
 }
 
@@ -262,15 +273,16 @@ foreach ($file in $photos) {
 
     # Skip already-renamed files (pattern: yyMMdd-hhmm ...)
     if ($file.Name -match '^\d{6}-\d{4} ') {
-        Write-Host "Skipping already renamed: $($file.Name)"
+        Write-Warning "  Already renamed, skipping: $($file.Name)"
         continue
     }
 
-    Write-Host "Processing $($file.Name)..."
+    Write-Information "Processing $($file.Name)..." -InformationAction Continue
 
     # --- EXIF: date/time and GPS ----------------------------------------
     $exifOut = & $ExifToolPath -s3 -DateTimeOriginal -GPSLatitude# -GPSLongitude# "$($file.FullName)" 2>&1
     $exifLines = @($exifOut | Where-Object { $_ -match '\S' })
+    Write-Verbose "  EXIF raw output ($($exifLines.Count) lines): $($exifLines -join ' | ')"
 
     if ($exifLines.Count -lt 1 -or $exifLines[0] -notmatch '^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}') {
         Write-Warning "  No DateTimeOriginal - skipping $($file.Name)"
@@ -279,6 +291,7 @@ foreach ($file in $photos) {
     }
 
     $dateTimeRaw = $exifLines[0].Trim()   # e.g. "2026:03:01 14:32:15"
+    Write-Verbose "  EXIF DateTimeOriginal: $dateTimeRaw"
     if ($dateTimeRaw -match '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})') {
         $yy   = $matches[1].Substring(2, 2)
         $mm   = $matches[2]
@@ -301,12 +314,15 @@ foreach ($file in $photos) {
     if ($exifLines.Count -ge 3) {
         $latStr = $exifLines[1].Trim()
         $lonStr = $exifLines[2].Trim()
+        Write-Verbose "  GPS raw: lat=$latStr lon=$lonStr"
         if ($latStr -match '^-?\d+(\.\d+)?$' -and $lonStr -match '^-?\d+(\.\d+)?$') {
             $gpsLat = $latStr
             $gpsLon = $lonStr
             $match  = Get-NearestLocation -Lat ([double]$latStr) -Lon ([double]$lonStr) `
                           -Locations $locations -ThresholdMiles $ProximityThresholdMiles
             if ($match) {
+                $matchDist = Get-HaversineDistance ([double]$latStr) ([double]$lonStr) $match.lat $match.lon
+                Write-Verbose "  GPS matched '$($match.name)' at $([Math]::Round($matchDist,3)) mi"
                 $locationName = $match.name
             }
             else {
@@ -327,9 +343,11 @@ foreach ($file in $photos) {
 
     # --- OCR: odometer reading ------------------------------------------
     $ocr = Get-OdometerReading -ImagePath $file.FullName
+    Write-Verbose "  OCR result: reading=$($ocr.Reading) confidence=$($ocr.Confidence)"
     if ($ocr.Confidence -eq 'ok') {
         $reading  = [int]$ocr.Reading
         $maxDelta = ($gapSinceLastGood + 1) * $MaxTripMiles
+        Write-Verbose "  Odometer check: read=$reading prev=$lastOdometer maxDelta=$maxDelta"
         if ($null -ne $lastOdometer -and ($reading -lt $lastOdometer -or $reading -gt ($lastOdometer + $maxDelta))) {
             Write-Warning "  Odometer suspect: read $reading, previous was $lastOdometer (max delta $maxDelta mi)"
             $ocr = @{ Reading = "00000"; Confidence = "suspect:got=$reading,prev=$lastOdometer" }
@@ -362,7 +380,7 @@ foreach ($file in $photos) {
     # --- Rename and log -------------------------------------------------
     if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName")) {
         Rename-Item -Path $file.FullName -NewName $newName
-        Write-Host "  Renamed -> $newName"
+        Write-Information "  Renamed -> $newName" -InformationAction Continue
         $renamedCount++
 
         $logEntries += [PSCustomObject]@{
@@ -380,14 +398,19 @@ foreach ($file in $photos) {
 }
 
 $processedCount = @($photos | Where-Object { $_.Name -notmatch '^\d{6}-\d{4} ' }).Count
-Write-Host ""
-Write-Host "--- Summary ---"
-Write-Host "  Processed : $processedCount"
-Write-Host "  Renamed   : $renamedCount"
-Write-Host "  Skipped   : $($skipped.Count)"
+Write-Information "" -InformationAction Continue
+Write-Information "--- Summary ---" -InformationAction Continue
+Write-Information "  Processed : $processedCount" -InformationAction Continue
+Write-Information "  Renamed   : $renamedCount" -InformationAction Continue
+Write-Information "  Skipped   : $($skipped.Count)" -InformationAction Continue
 if ($skipped.Count -gt 0) {
     foreach ($s in $skipped) {
-        Write-Host "    - $($s.File): $($s.Reason)"
+        Write-Information "    - $($s.File): $($s.Reason)" -InformationAction Continue
     }
 }
-Write-Host "  Log       : $logFile"
+Write-Information "  Log       : $logFile" -InformationAction Continue
+Write-Information "[Rename-Photos] Done." -InformationAction Continue
+
+} finally {
+    Stop-Transcript | Out-Null
+}

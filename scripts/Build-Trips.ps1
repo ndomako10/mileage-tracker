@@ -143,6 +143,17 @@ $reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.
 $logFile  = Join-Path $reportsDir "rename-log.csv"
 $tripsOut = Join-Path $reportsDir "trips.csv"
 
+$logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
+    $paths.Logs
+} else { Join-Path $PSScriptRoot ".." "logs" }
+if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
+$transcriptPath = Join-Path $logsDir "build-trips-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+Start-Transcript -Path $transcriptPath -Append | Out-Null
+
+Write-Information "[Build-Trips] Starting — reports: $reportsDir" -InformationAction Continue
+
+try {
+
 $configErrors = @()
 if (-not $Folder)                    { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
 if (-not (Test-Path $logFile))       { $configErrors += "rename-log.csv not found (run Rename-Photos.ps1 first): $logFile" }
@@ -186,6 +197,7 @@ foreach ($row in $rawLog) {
 
     $odom = 0
     [int]::TryParse($row.Odometer, [ref]$odom) | Out-Null
+    Write-Verbose "  Parsed entry: $($row.NewFile) | $dt | $($row.Location) | odom=$odom | conf=$($row.OdometerConfidence)"
 
     $entries += [PSCustomObject]@{
         File               = $row.NewFile
@@ -199,7 +211,7 @@ foreach ($row in $rawLog) {
 # Sort by timestamp
 $entries = $entries | Sort-Object DateTime
 
-Write-Host "Loaded $($entries.Count) log entries. Building trips..."
+Write-Information "Loaded $($entries.Count) log entries. Building trips..." -InformationAction Continue
 
 # ---------------------------------------------------------------------------
 # Deduplication pre-pass
@@ -217,7 +229,8 @@ foreach ($entry in $entries) {
         $sameOdom     = $entry.Odometer -eq $prevEntry.Odometer
 
         if ($sameLocation -and $sameOdom -and $gap -lt $DuplicateWindowSeconds) {
-            Write-Host "  Deduplicating $($entry.File) (duplicate of $($prevEntry.File), $([int]$gap)s gap)"
+            Write-Verbose "  Dedup check: same=$sameLocation/$sameOdom gap=$([int]$gap)s — removing $($entry.File)"
+            Write-Information "  Deduplicating $($entry.File) (duplicate of $($prevEntry.File), $([int]$gap)s gap)" -InformationAction Continue
             $dupCount++
             continue
         }
@@ -227,7 +240,7 @@ foreach ($entry in $entries) {
 }
 
 if ($dupCount -gt 0) {
-    Write-Host "  Removed $dupCount duplicate(s). Proceeding with $($deduped.Count) entries."
+    Write-Information "  Removed $dupCount duplicate(s). Proceeding with $($deduped.Count) entries." -InformationAction Continue
 }
 
 # ---------------------------------------------------------------------------
@@ -283,6 +296,7 @@ foreach ($entry in $deduped) {
     # --- Different locations: this is a trip --------------------------------
     $odomDelta    = $entry.Odometer - $pending.Odometer
     $expectedDist = Get-ExpectedDistance $pending.Location $entry.Location $locationMap $RoadFactor
+    Write-Verbose "  Pairing: '$($pending.Location)' -> '$($entry.Location)' | odomDelta=$odomDelta | expectedDist=$expectedDist"
 
     $ocrBad     = ($pending.OdometerConfidence -ne "ok") -or ($entry.OdometerConfidence -ne "ok")
     $unknownLoc = ($pending.Location -eq "Unknown") -or ($entry.Location -eq "Unknown")
@@ -318,6 +332,7 @@ foreach ($entry in $deduped) {
 
     if ($expectedDist -gt 0 -and -not $ocrBad -and -not $unknownLoc) {
         $deviation = [Math]::Abs($odomDelta - $expectedDist) / $expectedDist
+        Write-Verbose "  Distance check: deviation=$([Math]::Round($deviation*100,1))% tolerance=$([Math]::Round($TolerancePct*100,0))%"
         if ($deviation -le $TolerancePct) {
             $status = "auto"
         }
@@ -328,6 +343,7 @@ foreach ($entry in $deduped) {
     elseif ($expectedDist -lt 0) {
         $notes += "no route data for this location pair"
     }
+    Write-Verbose "  Trip status: $status$(if ($notes) { ' — ' + ($notes -join '; ') })"
 
     $trips += [PSCustomObject]@{
         Date             = Format-TripDate $pending.DateTime
@@ -376,18 +392,24 @@ $review   = ($trips | Where-Object { $_.Status -eq "review"   }).Count
 $unpaired = ($trips | Where-Object { $_.Status -eq "unpaired" }).Count
 $stops    = ($trips | Where-Object { $_.Status -eq "stop"     }).Count
 
-Write-Host "  Auto-matched : $auto"
-Write-Host "  Needs review : $review"
-Write-Host "  Unpaired     : $unpaired"
-Write-Host "  Stops (ref)  : $stops"
+Write-Information "  Auto-matched : $auto" -InformationAction Continue
+Write-Information "  Needs review : $review" -InformationAction Continue
+Write-Information "  Unpaired     : $unpaired" -InformationAction Continue
+Write-Information "  Stops (ref)  : $stops" -InformationAction Continue
 
 # Export CSV
 if ($PSCmdlet.ShouldProcess($tripsOut, "Write trips CSV")) {
     $trips | Export-Csv -Path $tripsOut -NoTypeInformation -Encoding utf8
-    Write-Host ""
-    Write-Host "Trips written to: $tripsOut"
+    Write-Information "" -InformationAction Continue
+    Write-Information "Trips written to: $tripsOut" -InformationAction Continue
     if ($review -gt 0 -or $unpaired -gt 0) {
-        Write-Host ""
-        Write-Host "Open trips.csv and manually complete rows where Status = 'review' or 'unpaired'."
+        Write-Information "" -InformationAction Continue
+        Write-Information "Open trips.csv and manually complete rows where Status = 'review' or 'unpaired'." -InformationAction Continue
     }
+}
+
+Write-Information "[Build-Trips] Done." -InformationAction Continue
+
+} finally {
+    Stop-Transcript | Out-Null
 }
