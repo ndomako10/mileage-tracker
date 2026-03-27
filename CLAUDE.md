@@ -52,3 +52,18 @@ See [PLAN.md](../PLAN.md) for the full implementation plan, issue groupings, and
 
 `CHANGELOG.md` is maintained by hand following [Keep a Changelog](https://keepachangelog.com/) conventions — do not regenerate it from commit history.
 
+## Releases
+
+Releases are cut automatically by `.github/workflows/release.yml` when a PR is merged to `main`. The version bump is derived from the squash commit title (i.e. the PR title):
+
+| PR title prefix | Bump |
+|-----------------|------|
+| `type!:` or `BREAKING CHANGE:` in body | major |
+| `feat:` / `feat(scope):` | minor |
+| `fix:` / `perf:` | patch |
+| `chore`, `docs`, `ci`, `test`, `refactor`, `style` | none |
+
+**Requirements:**
+- PRs must be merged using **squash merge** so the PR title becomes the commit on `main`.
+- PR titles must follow Conventional Commits — the workflow uses the title to determine the bump level.
+
