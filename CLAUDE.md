@@ -37,13 +37,12 @@ When adding new file references in either script, follow this same pattern — n
 
 ## Testing
 
-Use the `-DryRun` flag on `Rename-Photos.ps1` to preview renames without making changes:
+Use `-WhatIf` to preview actions without making changes, or `-Confirm` to prompt before each action:
 
 ```powershell
-.\scripts\Rename-Photos.ps1 -DryRun
+.\scripts\Rename-Photos.ps1 -WhatIf
+.\scripts\Build-Trips.ps1 -WhatIf
 ```
-
-`Build-Trips.ps1` has no dry-run mode; running it only writes `trips.csv` which is gitignored.
 
 ## Implementation plan
 

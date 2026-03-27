@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `Rename-Photos.ps1` — replaced custom `-DryRun` switch with standard `[CmdletBinding(SupportsShouldProcess)]`; use `-WhatIf` to preview renames and `-Confirm` to prompt before each rename
+- `Build-Trips.ps1` — added `[CmdletBinding(SupportsShouldProcess)]`; use `-WhatIf` to preview the CSV write
+
+### Removed
+- `Rename-Photos.ps1` — `-DryRun` parameter
+
 ## [0.1.0] - 2026-03-26
 
 ### Added
