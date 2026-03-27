@@ -52,6 +52,8 @@ See [PLAN.md](../PLAN.md) for the full implementation plan, issue groupings, and
 
 `CHANGELOG.md` is maintained by hand following [Keep a Changelog](https://keepachangelog.com/) conventions — do not regenerate it from commit history.
 
+Before merging a PR that will cut a release (`feat`, `fix`, or `perf` type), update `CHANGELOG.md` as part of the PR: move entries from `[Unreleased]` into a new versioned section with the expected version number and today's date. The release workflow runs immediately on merge, so the changelog must be accurate before the PR lands.
+
 ## Releases
 
 Releases are cut automatically by `.github/workflows/release.yml` when a PR is merged to `main`. The version bump is derived from the squash commit title (i.e. the PR title):
