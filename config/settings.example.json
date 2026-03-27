@@ -7,6 +7,7 @@
   },
   "LocationsJson": "locations.json",
   "ExifToolPath": "exiftool-13.53_64\\exiftool.exe",
+  "FallbackLocation": "Unknown",
   "ProximityThresholdMiles": 1.0,
   "MaxTripMiles": 250,
   "RoadFactor": 1.25,

@@ -198,6 +198,10 @@ if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolP
 if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
 if (-not $PSBoundParameters.ContainsKey('MaxTripMiles'))            { $MaxTripMiles            = [int]$settings['MaxTripMiles'] }
 
+$fallbackLocation = if ($settings.ContainsKey('FallbackLocation') -and $settings['FallbackLocation']) {
+    $settings['FallbackLocation']
+} else { "Unknown" }
+
 $configErrors = @()
 if (-not $Folder)                     { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
 elseif (-not (Test-Path $Folder))     { $configErrors += "Source folder not found: $Folder" }
@@ -231,6 +235,8 @@ $logFile = Join-Path $reportsDir "rename-log.json"
 $logEntries       = @()
 $lastOdometer     = $null
 $gapSinceLastGood = 0
+$skipped          = [System.Collections.Generic.List[PSCustomObject]]::new()
+$renamedCount     = 0
 
 if (Test-Path $logFile) {
     $loaded = Get-Content $logFile -Raw | ConvertFrom-Json
@@ -268,6 +274,7 @@ foreach ($file in $photos) {
 
     if ($exifLines.Count -lt 1 -or $exifLines[0] -notmatch '^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}') {
         Write-Warning "  No DateTimeOriginal - skipping $($file.Name)"
+        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "EXIF: DateTimeOriginal missing or unreadable" })
         continue
     }
 
@@ -282,11 +289,12 @@ foreach ($file in $photos) {
     }
     else {
         Write-Warning "  Could not parse date from '$dateTimeRaw' - skipping $($file.Name)"
+        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "EXIF: date unparseable: '$dateTimeRaw'" })
         continue
     }
 
     # --- GPS proximity matching -----------------------------------------
-    $locationName = "Unknown"
+    $locationName = $fallbackLocation
     $gpsLat       = ""
     $gpsLon       = ""
 
@@ -302,12 +310,19 @@ foreach ($file in $photos) {
                 $locationName = $match.name
             }
             else {
-                Write-Warning "  GPS ($latStr, $lonStr) did not match any known location within $ProximityThresholdMiles mi"
+                Write-Warning "  GPS ($latStr, $lonStr) did not match any known location within $ProximityThresholdMiles mi - using '$fallbackLocation'"
             }
+        }
+        else {
+            Write-Warning "  GPS data unparseable in $($file.Name) - skipping"
+            $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "GPS unparseable: '$latStr', '$lonStr'" })
+            continue
         }
     }
     else {
-        Write-Warning "  No GPS data in $($file.Name) - location set to Unknown"
+        Write-Warning "  No GPS data in $($file.Name) - skipping"
+        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "GPS absent" })
+        continue
     }
 
     # --- OCR: odometer reading ------------------------------------------
@@ -328,25 +343,27 @@ foreach ($file in $photos) {
         $gapSinceLastGood++
     }
     if ($ocr.Confidence -ne 'ok') {
-        Write-Warning "  OCR confidence '$($ocr.Confidence)' for $($file.Name)"
+        Write-Warning "  OCR confidence '$($ocr.Confidence)' for $($file.Name) - skipping"
+        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "OCR: $($ocr.Confidence)" })
+        continue
     }
 
     # --- Build new filename ---------------------------------------------
     $newName = "$datePart $locationName $($ocr.Reading).jpg"
     $newPath = Join-Path $outputFolder $newName
 
-    # Prevent overwrite with a counter suffix
-    $counter = 1
-    while (Test-Path $newPath) {
-        $newName = "$datePart $locationName $($ocr.Reading) ($counter).jpg"
-        $newPath = Join-Path $outputFolder $newName
-        $counter++
+    # Skip rather than overwrite an existing file
+    if (Test-Path $newPath) {
+        Write-Warning "  Target already exists: $newName - skipping $($file.Name)"
+        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "Target already exists: $newName" })
+        continue
     }
 
     # --- Rename and log -------------------------------------------------
     if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName")) {
         Rename-Item -Path $file.FullName -NewName $newName
         Write-Host "  Renamed -> $newName"
+        $renamedCount++
 
         $logEntries += [PSCustomObject]@{
             OriginalFile       = $file.Name
@@ -362,5 +379,15 @@ foreach ($file in $photos) {
     }
 }
 
+$processedCount = @($photos | Where-Object { $_.Name -notmatch '^\d{6}-\d{4} ' }).Count
 Write-Host ""
-Write-Host "Done. Log: $logFile"
+Write-Host "--- Summary ---"
+Write-Host "  Processed : $processedCount"
+Write-Host "  Renamed   : $renamedCount"
+Write-Host "  Skipped   : $($skipped.Count)"
+if ($skipped.Count -gt 0) {
+    foreach ($s in $skipped) {
+        Write-Host "    - $($s.File): $($s.Reason)"
+    }
+}
+Write-Host "  Log       : $logFile"
