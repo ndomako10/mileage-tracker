@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-27
+
+### Fixed
+- `release.yml` — separate `#v` shell substitution from GitHub Actions expression syntax to fix workflow parse error
+
+## [0.2.0] - 2026-03-27
+
 ### Changed
 - `Rename-Photos.ps1` — replaced custom `-DryRun` switch with standard `[CmdletBinding(SupportsShouldProcess)]`; use `-WhatIf` to preview renames and `-Confirm` to prompt before each rename
 - `Build-Trips.ps1` — added `[CmdletBinding(SupportsShouldProcess)]`; use `-WhatIf` to preview the CSV write
@@ -20,8 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Rename-Photos.ps1` — renames odometer photos using EXIF date/time, GPS location matching, and Windows OCR
 - `Build-Trips.ps1` — pairs consecutive odometer readings into trips and validates distances via Haversine × road factor
 - `locations.example.json` — template for known locations with GPS coordinates
-- `settings.example.json` — template for local configuration (photo folder path, ExifTool path, thresholds)
-- `PLAN.md` — full technical design document
+- `settings.example.json` — template for local configuration (photo folder path, ExifTool path, thresholds, and configurable `Paths` for source, output, and reports directories)
+- Startup validation of `settings.json` and `locations.json` with clear error messages
 
-[Unreleased]: https://github.com/ndomako10/mileage-tracker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ndomako10/mileage-tracker/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ndomako10/mileage-tracker/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/ndomako10/mileage-tracker/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ndomako10/mileage-tracker/releases/tag/v0.1.0
