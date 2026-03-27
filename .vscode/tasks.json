@@ -58,6 +58,184 @@
         "clear": true
       },
       "problemMatcher": []
+    },
+
+    // ── GitHub (gh) ────────────────────────────────────────────────────────
+    {
+      "label": "gh: PR List",
+      "type": "shell",
+      "command": "gh pr list",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: PR Create",
+      "type": "shell",
+      "command": "gh pr create",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: PR View",
+      "type": "shell",
+      "command": "gh pr view",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: PR View (web)",
+      "type": "shell",
+      "command": "gh pr view --web",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: PR Merge",
+      "type": "shell",
+      "command": "gh pr merge",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: PR Checks",
+      "type": "shell",
+      "command": "gh pr checks",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Issue List",
+      "type": "shell",
+      "command": "gh issue list",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Issue Create",
+      "type": "shell",
+      "command": "gh issue create",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Issue View",
+      "type": "shell",
+      "command": "gh issue view ${input:ghIssueNumber}",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Issue Close",
+      "type": "shell",
+      "command": "gh issue close ${input:ghIssueNumber}",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Repo View (web)",
+      "type": "shell",
+      "command": "gh repo view --web",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Run List",
+      "type": "shell",
+      "command": "gh run list",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gh: Run View",
+      "type": "shell",
+      "command": "gh run view",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "ghIssueNumber",
+      "type": "promptString",
+      "description": "Issue number"
     }
   ]
 }
