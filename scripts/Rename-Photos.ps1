@@ -202,6 +202,10 @@ $fallbackLocation = if ($settings.ContainsKey('FallbackLocation') -and $settings
     $settings['FallbackLocation']
 } else { "Unknown" }
 
+$sortFolderFormat = if ($settings.ContainsKey('SortFolderFormat') -and $settings['SortFolderFormat']) {
+    $settings['SortFolderFormat']
+} else { "yyyy/yyMM" }
+
 $configErrors = @()
 if (-not $Folder)                     { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
 elseif (-not (Test-Path $Folder))     { $configErrors += "Source folder not found: $Folder" }
@@ -298,7 +302,8 @@ foreach ($file in $photos) {
         $dd   = $matches[3]
         $hh   = $matches[4]
         $mi   = $matches[5]
-        $datePart = "$yy$mm$dd-$hh$mi"   # e.g. "260301-1432"
+        $datePart  = "$yy$mm$dd-$hh$mi"   # e.g. "260301-1432"
+        $photoDate = [DateTime]::new([int]$matches[1], [int]$mm, [int]$dd, [int]$hh, [int]$mi, 0)
     }
     else {
         Write-Warning "  Could not parse date from '$dateTimeRaw' - skipping $($file.Name)"
@@ -366,9 +371,10 @@ foreach ($file in $photos) {
         continue
     }
 
-    # --- Build new filename ---------------------------------------------
-    $newName = "$datePart $locationName $($ocr.Reading).jpg"
-    $newPath = Join-Path $outputFolder $newName
+    # --- Build new filename and destination subfolder -------------------
+    $newName    = "$datePart $locationName $($ocr.Reading).jpg"
+    $destFolder = Join-Path $outputFolder $photoDate.ToString($sortFolderFormat, [CultureInfo]::InvariantCulture)
+    $newPath    = Join-Path $destFolder $newName
 
     # Skip rather than overwrite an existing file
     if (Test-Path $newPath) {
@@ -377,15 +383,19 @@ foreach ($file in $photos) {
         continue
     }
 
-    # --- Rename and log -------------------------------------------------
-    if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName")) {
+    # --- Rename, sort, and log ------------------------------------------
+    if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName and move to $destFolder")) {
+        $renamedPath = Join-Path (Split-Path $file.FullName -Parent) $newName
         Rename-Item -Path $file.FullName -NewName $newName
-        Write-Information "  Renamed -> $newName" -InformationAction Continue
+        if (-not (Test-Path $destFolder)) { New-Item -ItemType Directory -Path $destFolder | Out-Null }
+        Move-Item -Path $renamedPath -Destination $destFolder
+        Write-Information "  Renamed and moved -> $newPath" -InformationAction Continue
         $renamedCount++
 
         $logEntries += [PSCustomObject]@{
             OriginalFile       = $file.Name
             NewFile            = $newName
+            DestinationPath    = $newPath
             DateTimeOriginal   = $dateTimeRaw
             Location           = $locationName
             Odometer           = $ocr.Reading
