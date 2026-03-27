@@ -5,7 +5,6 @@ config/locations.json
 
 # Generated output — not committed
 logs/rename-log.json
-logs/rename-log.csv
 trips.csv
 
 # ExifTool binary — download from https://exiftool.org/
