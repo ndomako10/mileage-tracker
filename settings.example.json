@@ -3,5 +3,8 @@
   "LocationsJson": "locations.json",
   "ExifToolPath": "exiftool-13.53_64\\exiftool.exe",
   "ProximityThresholdMiles": 1.0,
-  "MaxTripMiles": 250
+  "MaxTripMiles": 250,
+  "RoadFactor": 1.25,
+  "TolerancePct": 0.20,
+  "DuplicateWindowSeconds": 120
 }

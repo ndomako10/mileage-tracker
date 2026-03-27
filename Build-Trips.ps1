@@ -44,6 +44,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ---------------------------------------------------------------------------
+# Load settings.json — values override param defaults; explicit args win
+# ---------------------------------------------------------------------------
+$settingsPath = Join-Path $PSScriptRoot "settings.json"
+if (Test-Path $settingsPath) {
+    $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if (-not $PSBoundParameters.ContainsKey('Folder') -and $cfg.Folder) {
+        $Folder = $cfg.Folder
+    }
+    if (-not $PSBoundParameters.ContainsKey('LocationsJson') -and $cfg.LocationsJson) {
+        $LocationsJson = if ([System.IO.Path]::IsPathRooted($cfg.LocationsJson)) {
+            $cfg.LocationsJson
+        } else {
+            Join-Path $PSScriptRoot $cfg.LocationsJson
+        }
+    }
+    if (-not $PSBoundParameters.ContainsKey('RoadFactor') -and $null -ne $cfg.RoadFactor) {
+        $RoadFactor = [double]$cfg.RoadFactor
+    }
+    if (-not $PSBoundParameters.ContainsKey('TolerancePct') -and $null -ne $cfg.TolerancePct) {
+        $TolerancePct = [double]$cfg.TolerancePct
+    }
+    if (-not $PSBoundParameters.ContainsKey('DuplicateWindowSeconds') -and $null -ne $cfg.DuplicateWindowSeconds) {
+        $DuplicateWindowSeconds = [int]$cfg.DuplicateWindowSeconds
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Haversine distance (miles)
 # ---------------------------------------------------------------------------
 function Get-HaversineDistance {
