@@ -50,9 +50,7 @@ See [PLAN.md](../PLAN.md) for the full implementation plan, issue groupings, and
 
 ## Changelog
 
-`CHANGELOG.md` is maintained by hand following [Keep a Changelog](https://keepachangelog.com/) conventions — do not regenerate it from commit history.
-
-Before merging a PR that will cut a release (`feat`, `fix`, or `perf` type), update `CHANGELOG.md` as part of the PR: move entries from `[Unreleased]` into a new versioned section with the expected version number and today's date. The release workflow runs immediately on merge, so the changelog must be accurate before the PR lands.
+This project does **not** maintain a `CHANGELOG.md`. This overrides the global `CLAUDE.md` convention. Release notes are generated automatically by GitHub from PR titles and descriptions when a release is cut.
 
 ## Releases
 

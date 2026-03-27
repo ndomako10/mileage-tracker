@@ -70,4 +70,4 @@ jobs:
           git push origin "$VERSION"
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --notes "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
+            --generate-notes
