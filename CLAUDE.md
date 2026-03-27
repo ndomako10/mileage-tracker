@@ -54,7 +54,7 @@ This project does **not** maintain a `CHANGELOG.md`. This overrides the global `
 
 ## Releases
 
-Releases are cut automatically by `.github/workflows/release.yml` when a PR is merged to `main`. The version bump is derived from the squash commit title (i.e. the PR title):
+Releases are cut automatically by `.github/workflows/release.yml` when a PR is merged to `main`. The version bump is derived from the PR title:
 
 | PR title prefix | Bump |
 |-----------------|------|
@@ -64,6 +64,7 @@ Releases are cut automatically by `.github/workflows/release.yml` when a PR is m
 | `chore`, `docs`, `ci`, `test`, `refactor`, `style` | none |
 
 **Requirements:**
-- PRs must be merged using **squash merge** so the PR title becomes the commit on `main`.
+- PRs must be merged using **squash merge** to keep a clean, readable `git log` on `main`.
 - PR titles must follow Conventional Commits — the workflow uses the title to determine the bump level.
+- **Write meaningful PR descriptions** — GitHub auto-generates release notes from PR titles and descriptions. The description becomes the release notes entry for that change.
 
