@@ -48,32 +48,39 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 $paths = $null
 $settingsPath = Join-Path $PSScriptRoot ".." "config" "settings.json"
-if (Test-Path $settingsPath) {
+if (-not (Test-Path $settingsPath)) {
+    Write-Error "settings.json not found: $settingsPath"
+    exit 1
+}
+try {
     $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    $paths = if ($cfg.PSObject.Properties['Paths']) { $cfg.Paths } else { $null }
-    if (-not $PSBoundParameters.ContainsKey('Folder')) {
-        if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
-            $Folder = $paths.Source
-        } elseif ($cfg.Folder) {
-            $Folder = $cfg.Folder
-        }
+} catch {
+    Write-Error "settings.json is not valid JSON ($settingsPath): $($_.Exception.Message)"
+    exit 1
+}
+$paths = if ($cfg.PSObject.Properties['Paths']) { $cfg.Paths } else { $null }
+if (-not $PSBoundParameters.ContainsKey('Folder')) {
+    if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
+        $Folder = $paths.Source
+    } elseif ($cfg.Folder) {
+        $Folder = $cfg.Folder
     }
-    if (-not $PSBoundParameters.ContainsKey('LocationsJson') -and $cfg.LocationsJson) {
-        $LocationsJson = if ([System.IO.Path]::IsPathRooted($cfg.LocationsJson)) {
-            $cfg.LocationsJson
-        } else {
-            Join-Path (Split-Path $settingsPath -Parent) $cfg.LocationsJson
-        }
+}
+if (-not $PSBoundParameters.ContainsKey('LocationsJson') -and $cfg.LocationsJson) {
+    $LocationsJson = if ([System.IO.Path]::IsPathRooted($cfg.LocationsJson)) {
+        $cfg.LocationsJson
+    } else {
+        Join-Path (Split-Path $settingsPath -Parent) $cfg.LocationsJson
     }
-    if (-not $PSBoundParameters.ContainsKey('RoadFactor') -and $null -ne $cfg.RoadFactor) {
-        $RoadFactor = [double]$cfg.RoadFactor
-    }
-    if (-not $PSBoundParameters.ContainsKey('TolerancePct') -and $null -ne $cfg.TolerancePct) {
-        $TolerancePct = [double]$cfg.TolerancePct
-    }
-    if (-not $PSBoundParameters.ContainsKey('DuplicateWindowSeconds') -and $null -ne $cfg.DuplicateWindowSeconds) {
-        $DuplicateWindowSeconds = [int]$cfg.DuplicateWindowSeconds
-    }
+}
+if (-not $PSBoundParameters.ContainsKey('RoadFactor') -and $null -ne $cfg.RoadFactor) {
+    $RoadFactor = [double]$cfg.RoadFactor
+}
+if (-not $PSBoundParameters.ContainsKey('TolerancePct') -and $null -ne $cfg.TolerancePct) {
+    $TolerancePct = [double]$cfg.TolerancePct
+}
+if (-not $PSBoundParameters.ContainsKey('DuplicateWindowSeconds') -and $null -ne $cfg.DuplicateWindowSeconds) {
+    $DuplicateWindowSeconds = [int]$cfg.DuplicateWindowSeconds
 }
 
 # ---------------------------------------------------------------------------
@@ -134,16 +141,25 @@ $reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.
 $logFile  = Join-Path $reportsDir "rename-log.csv"
 $tripsOut = Join-Path $reportsDir "trips.csv"
 
-if (-not (Test-Path $logFile)) {
-    Write-Error "rename-log.csv not found. Run Rename-Photos.ps1 first: $logFile"
-    exit 1
-}
-if (-not (Test-Path $LocationsJson)) {
-    Write-Error "locations.json not found: $LocationsJson"
+$configErrors = @()
+if (-not $Folder)                    { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
+if (-not (Test-Path $logFile))       { $configErrors += "rename-log.csv not found (run Rename-Photos.ps1 first): $logFile" }
+if (-not (Test-Path $LocationsJson)) { $configErrors += "locations.json not found: $LocationsJson" }
+if ($configErrors.Count -gt 0) {
+    $configErrors | ForEach-Object { Write-Error $_ }
     exit 1
 }
 
-$locations   = Get-Content $LocationsJson -Raw | ConvertFrom-Json
+try {
+    $locations = Get-Content $LocationsJson -Raw | ConvertFrom-Json
+} catch {
+    Write-Error "locations.json is not valid JSON ($LocationsJson): $($_.Exception.Message)"
+    exit 1
+}
+if (@($locations).Count -eq 0) {
+    Write-Error "locations.json must contain at least one entry: $LocationsJson"
+    exit 1
+}
 $locationMap = Get-LocationMap $locations
 
 # Load and parse log entries
@@ -155,8 +171,6 @@ foreach ($row in $rawLog) {
     if (-not $row.DateTimeOriginal) { continue }
 
     # Parse DateTimeOriginal: "2026:03:01 14:32:15"
-    $dts = $row.DateTimeOriginal -replace ':', '-' -replace '-', '/', 2   # "2026/03/01 14:32:15"
-    # More reliable: manual parse
     if ($row.DateTimeOriginal -match '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})') {
         $dt = [datetime]::new(
             [int]$matches[1], [int]$matches[2], [int]$matches[3],

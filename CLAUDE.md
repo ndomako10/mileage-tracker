@@ -23,7 +23,7 @@ logs/       rename-log output (gitignored)
 
 `config/settings.json` and `config/locations.json` are the user's local config. They are **gitignored and must never be committed**. Only the `*.example.json` templates belong in the repo.
 
-The same applies to all generated output: `logs/rename-log.json`, `logs/rename-log.csv`, `trips.csv`.
+The same applies to all generated output: `logs/rename-log.json`, `trips.csv`.
 
 ## Path conventions
 
@@ -45,10 +45,11 @@ Use the `-DryRun` flag on `Rename-Photos.ps1` to preview renames without making 
 
 `Build-Trips.ps1` has no dry-run mode; running it only writes `trips.csv` which is gitignored.
 
+## Implementation plan
+
+See [PLAN.md](../PLAN.md) for the full implementation plan, issue groupings, and recommended branch order.
+
 ## Changelog
 
 `CHANGELOG.md` is maintained by hand following [Keep a Changelog](https://keepachangelog.com/) conventions — do not regenerate it from commit history.
 
-## Open issues
-
-- **#1** — Sensitive data (real addresses, GPS coordinates, travel history) is present in the git history from the initial commit. The tracked files have been removed, but a history rewrite with `git filter-repo` or BFG is still needed before the repo can be made public.
