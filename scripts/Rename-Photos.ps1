@@ -176,6 +176,7 @@ if (-not (Test-Path $settingsFile)) {
 $s = Get-Content $settingsFile -Raw | ConvertFrom-Json
 $settings = @{}
 $s.PSObject.Properties | ForEach-Object { $settings[$_.Name] = $_.Value }
+$paths = if ($s.PSObject.Properties['Paths']) { $s.Paths } else { $null }
 
 function Resolve-RelativeSetting {
     param([string]$Key)
@@ -184,7 +185,11 @@ function Resolve-RelativeSetting {
     return Join-Path (Split-Path $settingsFile -Parent) $raw
 }
 
-if (-not $PSBoundParameters.ContainsKey('Folder'))                  { $Folder                  = $settings['Folder'] }
+if (-not $PSBoundParameters.ContainsKey('Folder')) {
+    $Folder = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
+        $paths.Source
+    } else { $settings['Folder'] }
+}
 if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $LocationsJson           = Resolve-RelativeSetting 'LocationsJson' }
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
 if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
@@ -204,7 +209,15 @@ if (-not (Test-Path $ExifToolPath)) {
 }
 
 $locations = Get-Content $LocationsJson -Raw | ConvertFrom-Json
-$logFile   = Join-Path $PSScriptRoot ".." "logs" "rename-log.json"
+
+$outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths.Output) {
+    $paths.Output
+} else { $Folder }
+
+$reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.Reports) {
+    $paths.Reports
+} else { Join-Path $PSScriptRoot ".." "logs" }
+$logFile = Join-Path $reportsDir "rename-log.json"
 
 $logEntries       = @()
 $lastOdometer     = $null
@@ -311,13 +324,13 @@ foreach ($file in $photos) {
 
     # --- Build new filename ---------------------------------------------
     $newName = "$datePart $locationName $($ocr.Reading).jpg"
-    $newPath = Join-Path $Folder $newName
+    $newPath = Join-Path $outputFolder $newName
 
     # Prevent overwrite with a counter suffix
     $counter = 1
     while (Test-Path $newPath) {
         $newName = "$datePart $locationName $($ocr.Reading) ($counter).jpg"
-        $newPath = Join-Path $Folder $newName
+        $newPath = Join-Path $outputFolder $newName
         $counter++
     }
 
