@@ -171,8 +171,6 @@ foreach ($row in $rawLog) {
     if (-not $row.DateTimeOriginal) { continue }
 
     # Parse DateTimeOriginal: "2026:03:01 14:32:15"
-    $dts = $row.DateTimeOriginal -replace ':', '-' -replace '-', '/', 2   # "2026/03/01 14:32:15"
-    # More reliable: manual parse
     if ($row.DateTimeOriginal -match '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})') {
         $dt = [datetime]::new(
             [int]$matches[1], [int]$matches[2], [int]$matches[3],
