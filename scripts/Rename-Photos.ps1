@@ -41,10 +41,10 @@
 #>
 param(
     [string]$Folder                  = "",
-    [string]$LocationsJson           = "",
-    [string]$ExifToolPath            = "",
-    [double]$ProximityThresholdMiles = 0,
-    [int]$MaxTripMiles               = 0,
+    [string]$LocationsJson           = "$PSScriptRoot\..\config\locations.json",
+    [string]$ExifToolPath            = "$PSScriptRoot\..\exiftool-13.53_64\exiftool.exe",
+    [double]$ProximityThresholdMiles = 1.0,
+    [int]$MaxTripMiles               = 250,
     [switch]$DryRun
 )
 
