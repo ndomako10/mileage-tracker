@@ -12,5 +12,6 @@
   "MaxTripMiles": 250,
   "RoadFactor": 1.25,
   "TolerancePct": 0.20,
-  "DuplicateWindowSeconds": 120
+  "DuplicateWindowSeconds": 120,
+  "SortFolderFormat": "yyyy/yyMM - MMMM"
 }
