@@ -2,14 +2,53 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Rename Photos (Dry Run)",
-      "type": "shell",
+      "label": "Rename Photos (What If)",
+      "type": "process",
       "command": "powershell.exe",
       "args": [
         "-NonInteractive",
-        "-File",
-        "${workspaceFolder}\\scripts\\Rename-Photos.ps1",
-        "-DryRun"
+        "-File", "${workspaceFolder}\\scripts\\Rename-Photos.ps1",
+        "-WhatIf"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Rename Photos (What If, Verbose)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NonInteractive",
+        "-File", "${workspaceFolder}\\scripts\\Rename-Photos.ps1",
+        "-WhatIf",
+        "-Verbose"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Rename Photos (What If, Verbose)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NonInteractive",
+        "-File", "${workspaceFolder}\\scripts\\Rename-Photos.ps1",
+        "-WhatIf",
+        "-Verbose"
       ],
       "group": "build",
       "presentation": {

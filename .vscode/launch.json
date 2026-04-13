@@ -1,0 +1,44 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run: Rename Photos",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/scripts/Rename-Photos.ps1",
+            "args": [
+            ]
+        },
+        {
+            "name": "Run: Rename Photos (Verbose)",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/scripts/Rename-Photos.ps1",
+            "args": [
+                "-Verbose"
+            ]
+        },
+        {
+            "name": "Run: Rename Photos (WhatIf)",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/scripts/Rename-Photos.ps1",
+            "args": [
+                "-WhatIf"
+            ]
+        },
+        {
+            "name": "Run: Rename Photos (Verbose & WhatIf)",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/scripts/Rename-Photos.ps1",
+            "args": [
+                "-WhatIf",
+                "-Verbose"
+            ]
+        }
+    ]
+}

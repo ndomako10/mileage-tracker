@@ -15,7 +15,7 @@
     Default values are loaded from settings.json beside this script.
     Any parameter passed on the command line overrides the corresponding setting.
 
-.PARAMETER Folder
+.PARAMETER Source
     Path to the folder containing odometer photos.
 
 .PARAMETER LocationsJson
@@ -34,12 +34,12 @@
 .EXAMPLE
     .\Rename-Photos.ps1 -WhatIf
     .\Rename-Photos.ps1
-    .\Rename-Photos.ps1 -Folder "D:\Photos\Odometer" -WhatIf
+    .\Rename-Photos.ps1 -Source "D:\Photos\Odometer" -WhatIf
     .\Rename-Photos.ps1 -Confirm
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$Folder                  = "",
+    [string]$Source                  = "",
     [string]$LocationsJson           = "$PSScriptRoot\..\config\locations.json",
     [string]$ExifToolPath            = "$PSScriptRoot\..\exiftool-13.53_64\exiftool.exe",
     [double]$ProximityThresholdMiles = 1.0,
@@ -49,39 +49,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ---------------------------------------------------------------------------
-# Haversine distance (miles) between two lat/lon points
-# ---------------------------------------------------------------------------
-function Get-HaversineDistance {
-    param([double]$Lat1, [double]$Lon1, [double]$Lat2, [double]$Lon2)
-    $R    = 3958.8
-    $dLat = ($Lat2 - $Lat1) * [Math]::PI / 180
-    $dLon = ($Lon2 - $Lon1) * [Math]::PI / 180
-    $a    = [Math]::Sin($dLat / 2) * [Math]::Sin($dLat / 2) +
-            [Math]::Cos($Lat1 * [Math]::PI / 180) * [Math]::Cos($Lat2 * [Math]::PI / 180) *
-            [Math]::Sin($dLon / 2) * [Math]::Sin($dLon / 2)
-    $c    = 2 * [Math]::Atan2([Math]::Sqrt($a), [Math]::Sqrt(1 - $a))
-    return $R * $c
-}
-
-# ---------------------------------------------------------------------------
-# Match GPS coordinates to the nearest known location
-# Returns the location object, or $null if nothing is within threshold
-# ---------------------------------------------------------------------------
-function Get-NearestLocation {
-    param([double]$Lat, [double]$Lon, [array]$Locations, [double]$ThresholdMiles)
-    $nearest = $null
-    $minDist = [double]::MaxValue
-    foreach ($loc in $Locations) {
-        $dist = Get-HaversineDistance $Lat $Lon $loc.lat $loc.lon
-        if ($dist -lt $minDist) {
-            $minDist = $dist
-            $nearest = $loc
-        }
-    }
-    if ($minDist -le $ThresholdMiles) { return $nearest }
-    return $null
-}
+. "$PSScriptRoot\MileageTrackerHelpers.ps1"
 
 # ---------------------------------------------------------------------------
 # Windows OCR -- extract the odometer reading from a photo
@@ -166,7 +134,7 @@ function Get-OdometerReading {
 # ---------------------------------------------------------------------------
 # Load settings.json; command-line params take precedence over file values
 # ---------------------------------------------------------------------------
-$settingsFile = Join-Path $PSScriptRoot ".." "config" "settings.json"
+$settingsFile = Join-Path $PSScriptRoot "..\config\settings.json"
 if (-not (Test-Path $settingsFile)) {
     Write-Error "settings.json not found: $settingsFile"
     exit 1
@@ -188,10 +156,8 @@ function Resolve-RelativeSetting {
     return Join-Path (Split-Path $settingsFile -Parent) $raw
 }
 
-if (-not $PSBoundParameters.ContainsKey('Folder')) {
-    $Folder = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
-        $paths.Source
-    } else { $settings['Folder'] }
+$Source = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
+    $paths.Source
 }
 if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $LocationsJson           = Resolve-RelativeSetting 'LocationsJson' }
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
@@ -207,8 +173,8 @@ $sortFolderFormat = if ($settings.ContainsKey('SortFolderFormat') -and $settings
 } else { "yyyy/yyMM" }
 
 $configErrors = @()
-if (-not $Folder)                     { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
-elseif (-not (Test-Path $Folder))     { $configErrors += "Source folder not found: $Folder" }
+if (-not $Source)                     { $configErrors += "settings.json: 'Paths.Source' (or 'Folder') is required" }
+elseif (-not (Test-Path $Source))     { $configErrors += "Source folder not found: $Source" }
 if (-not (Test-Path $LocationsJson))  { $configErrors += "locations.json not found: $LocationsJson" }
 if (-not (Test-Path $ExifToolPath))   { $configErrors += "ExifTool not found: $ExifToolPath" }
 if ($configErrors.Count -gt 0) {
@@ -229,21 +195,21 @@ if (@($locations).Count -eq 0) {
 
 $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths.Output) {
     $paths.Output
-} else { $Folder }
+} else { $Source }
 
 $reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.Reports) {
     $paths.Reports
-} else { Join-Path $PSScriptRoot ".." "logs" }
+} else { Join-Path $PSScriptRoot "..\logs" }
 $logFile = Join-Path $reportsDir "rename-log.json"
 
 $logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
     $paths.Logs
-} else { Join-Path $PSScriptRoot ".." "logs" }
+} else { Join-Path $PSScriptRoot "..\logs" }
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
 $transcriptPath = Join-Path $logsDir "rename-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 Start-Transcript -Path $transcriptPath -Append | Out-Null
 
-Write-Information "[Rename-Photos] Starting — source: $Folder" -InformationAction Continue
+Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
 
 try {
 
@@ -267,19 +233,13 @@ if (Test-Path $logFile) {
     }
 }
 
-$photos = Get-ChildItem -Path $Folder -Filter "IMG_*.jpg"
+$photos = Get-ChildItem -Path $Source -Filter "IMG_*.jpeg"
 if ($photos.Count -eq 0) {
-    Write-Information "No IMG_*.jpg files found in $Folder" -InformationAction Continue
+    Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
     exit 0
 }
 
 foreach ($file in $photos) {
-
-    # Skip already-renamed files (pattern: yyMMdd-hhmm ...)
-    if ($file.Name -match '^\d{6}-\d{4} ') {
-        Write-Warning "  Already renamed, skipping: $($file.Name)"
-        continue
-    }
 
     Write-Information "Processing $($file.Name)..." -InformationAction Continue
 

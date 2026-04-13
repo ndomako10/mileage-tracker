@@ -45,11 +45,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. "$PSScriptRoot\MileageTrackerHelpers.ps1"
+
 # ---------------------------------------------------------------------------
-# Load settings.json — values override param defaults; explicit args win
+# Load settings.json - values override param defaults; explicit args win
 # ---------------------------------------------------------------------------
 $paths = $null
-$settingsPath = Join-Path $PSScriptRoot ".." "config" "settings.json"
+$settingsPath = Join-Path $PSScriptRoot "..\config\settings.json"
 if (-not (Test-Path $settingsPath)) {
     Write-Error "settings.json not found: $settingsPath"
     exit 1
@@ -86,54 +88,6 @@ if (-not $PSBoundParameters.ContainsKey('DuplicateWindowSeconds') -and $null -ne
 }
 
 # ---------------------------------------------------------------------------
-# Haversine distance (miles)
-# ---------------------------------------------------------------------------
-function Get-HaversineDistance {
-    param([double]$Lat1, [double]$Lon1, [double]$Lat2, [double]$Lon2)
-    $R    = 3958.8
-    $dLat = ($Lat2 - $Lat1) * [Math]::PI / 180
-    $dLon = ($Lon2 - $Lon1) * [Math]::PI / 180
-    $a    = [Math]::Sin($dLat / 2) * [Math]::Sin($dLat / 2) +
-            [Math]::Cos($Lat1 * [Math]::PI / 180) * [Math]::Cos($Lat2 * [Math]::PI / 180) *
-            [Math]::Sin($dLon / 2) * [Math]::Sin($dLon / 2)
-    $c    = 2 * [Math]::Atan2([Math]::Sqrt($a), [Math]::Sqrt(1 - $a))
-    return $R * $c
-}
-
-# ---------------------------------------------------------------------------
-# Build a lookup: location name -> location object
-# ---------------------------------------------------------------------------
-function Get-LocationMap {
-    param([array]$Locations)
-    $map = @{}
-    foreach ($loc in $Locations) { $map[$loc.name] = $loc }
-    return $map
-}
-
-# ---------------------------------------------------------------------------
-# Expected road distance between two named locations (miles)
-# Returns -1 if either location is unknown
-# ---------------------------------------------------------------------------
-function Get-ExpectedDistance {
-    param([string]$FromName, [string]$ToName, [hashtable]$LocationMap, [double]$RoadFactor)
-    if (-not $LocationMap.ContainsKey($FromName) -or -not $LocationMap.ContainsKey($ToName)) {
-        return -1
-    }
-    $a = $LocationMap[$FromName]
-    $b = $LocationMap[$ToName]
-    $straight = Get-HaversineDistance $a.lat $a.lon $b.lat $b.lon
-    return [Math]::Round($straight * $RoadFactor, 1)
-}
-
-# ---------------------------------------------------------------------------
-# Format a DateTime as the Excel Date column value (M/d/yyyy)
-# ---------------------------------------------------------------------------
-function Format-TripDate {
-    param([datetime]$dt)
-    return $dt.ToString("M/d/yyyy")
-}
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -145,12 +99,12 @@ $tripsOut = Join-Path $reportsDir "trips.csv"
 
 $logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
     $paths.Logs
-} else { Join-Path $PSScriptRoot ".." "logs" }
+} else { Join-Path $PSScriptRoot "..\logs" }
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
 $transcriptPath = Join-Path $logsDir "build-trips-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 Start-Transcript -Path $transcriptPath -Append | Out-Null
 
-Write-Information "[Build-Trips] Starting — reports: $reportsDir" -InformationAction Continue
+Write-Information "[Build-Trips] Starting - reports: $reportsDir" -InformationAction Continue
 
 try {
 
@@ -213,178 +167,9 @@ $entries = $entries | Sort-Object DateTime
 
 Write-Information "Loaded $($entries.Count) log entries. Building trips..." -InformationAction Continue
 
-# ---------------------------------------------------------------------------
-# Deduplication pre-pass
-# Removes entries that are true duplicates: same location, same odometer,
-# and taken within DuplicateWindowSeconds of the previous entry.
-# ---------------------------------------------------------------------------
-$deduped   = @()
-$prevEntry = $null
-$dupCount  = 0
-
-foreach ($entry in $entries) {
-    if ($null -ne $prevEntry) {
-        $gap          = ($entry.DateTime - $prevEntry.DateTime).TotalSeconds
-        $sameLocation = $entry.Location -eq $prevEntry.Location
-        $sameOdom     = $entry.Odometer -eq $prevEntry.Odometer
-
-        if ($sameLocation -and $sameOdom -and $gap -lt $DuplicateWindowSeconds) {
-            Write-Verbose "  Dedup check: same=$sameLocation/$sameOdom gap=$([int]$gap)s — removing $($entry.File)"
-            Write-Information "  Deduplicating $($entry.File) (duplicate of $($prevEntry.File), $([int]$gap)s gap)" -InformationAction Continue
-            $dupCount++
-            continue
-        }
-    }
-    $deduped  += $entry
-    $prevEntry = $entry
-}
-
-if ($dupCount -gt 0) {
-    Write-Information "  Removed $dupCount duplicate(s). Proceeding with $($deduped.Count) entries." -InformationAction Continue
-}
-
-# ---------------------------------------------------------------------------
-# Pairing pass
-#
-# Walks entries in chronological order. Each entry serves as the destination
-# of the previous trip AND the origin of the next -- so after emitting any
-# row (trip or stop), $pending advances to $entry rather than being cleared.
-#
-# Same-location consecutive entries (gap >= DuplicateWindowSeconds) are
-# treated as arrival + departure: a reference "stop" row is emitted and
-# the departure entry becomes the origin of the next trip.
-# ---------------------------------------------------------------------------
-$trips   = @()
-$pending = $null
-
-foreach ($entry in $deduped) {
-
-    if ($null -eq $pending) {
-        $pending = $entry
-        continue
-    }
-
-    # --- Same location: dwell (arrival + departure) -------------------------
-    if ($entry.Location -eq $pending.Location) {
-        $gap = ($entry.DateTime - $pending.DateTime).TotalSeconds
-        # Gap should always be >= DuplicateWindowSeconds here (duplicates removed above),
-        # but guard anyway.
-        if ($gap -ge $DuplicateWindowSeconds) {
-            $dwellMin = [int]($gap / 60)
-            $trips += [PSCustomObject]@{
-                Date             = Format-TripDate $pending.DateTime
-                DepartureTime    = $entry.DateTime.ToString("HH:mm")
-                ArrivalTime      = $pending.DateTime.ToString("HH:mm")
-                Origin           = $pending.Location
-                Destination      = ""
-                OdometerStart    = $pending.Odometer
-                OdometerEnd      = ""
-                Distance         = ""
-                ExpectedMiles    = ""
-                MatchConfidence  = ""
-                Status           = "stop"
-                Notes            = "Dwell $dwellMin min at $($pending.Location)"
-                OriginFile       = $pending.File
-                DestinationFile  = $entry.File
-            }
-        }
-        # Departure entry becomes new pending regardless
-        $pending = $entry
-        continue
-    }
-
-    # --- Different locations: this is a trip --------------------------------
-    $odomDelta    = $entry.Odometer - $pending.Odometer
-    $expectedDist = Get-ExpectedDistance $pending.Location $entry.Location $locationMap $RoadFactor
-    Write-Verbose "  Pairing: '$($pending.Location)' -> '$($entry.Location)' | odomDelta=$odomDelta | expectedDist=$expectedDist"
-
-    $ocrBad     = ($pending.OdometerConfidence -ne "ok") -or ($entry.OdometerConfidence -ne "ok")
-    $unknownLoc = ($pending.Location -eq "Unknown") -or ($entry.Location -eq "Unknown")
-
-    $status = "review"
-    $notes  = @()
-
-    if ($ocrBad)     { $notes += "OCR low confidence" }
-    if ($unknownLoc) { $notes += "unknown location" }
-
-    if ($odomDelta -lt 0) {
-        $notes  += "odometer decreased"
-        $status  = "unpaired"
-        $trips += [PSCustomObject]@{
-            Date             = Format-TripDate $pending.DateTime
-            DepartureTime    = $pending.DateTime.ToString("HH:mm")
-            ArrivalTime      = ""
-            Origin           = $pending.Location
-            Destination      = ""
-            OdometerStart    = $pending.Odometer
-            OdometerEnd      = ""
-            Distance         = ""
-            ExpectedMiles    = ""
-            MatchConfidence  = ""
-            Status           = "unpaired"
-            Notes            = $notes -join "; "
-            OriginFile       = $pending.File
-            DestinationFile  = ""
-        }
-        $pending = $entry
-        continue
-    }
-
-    if ($expectedDist -gt 0 -and -not $ocrBad -and -not $unknownLoc) {
-        $deviation = [Math]::Abs($odomDelta - $expectedDist) / $expectedDist
-        Write-Verbose "  Distance check: deviation=$([Math]::Round($deviation*100,1))% tolerance=$([Math]::Round($TolerancePct*100,0))%"
-        if ($deviation -le $TolerancePct) {
-            $status = "auto"
-        }
-        else {
-            $notes += "delta $odomDelta mi vs expected $expectedDist mi ($([Math]::Round($deviation*100,0))% off)"
-        }
-    }
-    elseif ($expectedDist -lt 0) {
-        $notes += "no route data for this location pair"
-    }
-    Write-Verbose "  Trip status: $status$(if ($notes) { ' — ' + ($notes -join '; ') })"
-
-    $trips += [PSCustomObject]@{
-        Date             = Format-TripDate $pending.DateTime
-        DepartureTime    = $pending.DateTime.ToString("HH:mm")
-        ArrivalTime      = $entry.DateTime.ToString("HH:mm")
-        Origin           = $pending.Location
-        Destination      = $entry.Location
-        OdometerStart    = $pending.Odometer
-        OdometerEnd      = $entry.Odometer
-        Distance         = $odomDelta
-        ExpectedMiles    = if ($expectedDist -gt 0) { $expectedDist } else { "" }
-        MatchConfidence  = $status
-        Status           = $status
-        Notes            = $notes -join "; "
-        OriginFile       = $pending.File
-        DestinationFile  = $entry.File
-    }
-
-    # Destination becomes the origin of the next trip
-    $pending = $entry
-}
-
-# Emit any trailing unpaired entry
-if ($null -ne $pending) {
-    $trips += [PSCustomObject]@{
-        Date             = Format-TripDate $pending.DateTime
-        DepartureTime    = $pending.DateTime.ToString("HH:mm")
-        ArrivalTime      = ""
-        Origin           = $pending.Location
-        Destination      = ""
-        OdometerStart    = $pending.Odometer
-        OdometerEnd      = ""
-        Distance         = ""
-        ExpectedMiles    = ""
-        MatchConfidence  = ""
-        Status           = "unpaired"
-        Notes            = "no partner found"
-        OriginFile       = $pending.File
-        DestinationFile  = ""
-    }
-}
+$trips = Get-TripPairings -Entries $entries -LocationMap $locationMap `
+    -RoadFactor $RoadFactor -TolerancePct $TolerancePct `
+    -DuplicateWindowSeconds $DuplicateWindowSeconds
 
 # Summary
 $auto     = ($trips | Where-Object { $_.Status -eq "auto"     }).Count

@@ -4,11 +4,14 @@ config/settings.local.json
 config/locations.json
 
 # Generated output — not committed
-logs/rename-log.json
-trips.csv
+logs/
+report/
 
 # ExifTool binary — download from https://exiftool.org/
 exiftool-13.53_64/
+
+# Test output
+test-results/
 
 # Windows
 Thumbs.db
