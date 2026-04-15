@@ -176,7 +176,7 @@ function Add-ExifDateTimeToPhotoContext {
     $mi   = [int]$matches[5]
 
     $Photo.Exif.DateTime = [datetime]::new($year, $mm, $dd, $hh, $mi, 0)
-    $Photo.Exif.DatePart = ("{0:00}{1}{2}-{3}{4}" -f ($year % 100), $mm, $dd, $hh, $mi)
+    $Photo.Exif.DatePart = ("{0:00}{1:00}{2:00}-{3:00}{4:00}" -f ($year % 100), $mm, $dd, $hh, $mi)
 
     return $true
 }
