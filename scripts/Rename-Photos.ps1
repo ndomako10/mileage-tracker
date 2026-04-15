@@ -684,8 +684,8 @@ $Source = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Sourc
 }
 if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $LocationsJson           = Resolve-RelativeSetting 'LocationsJson' }
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
-if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
-if (-not $PSBoundParameters.ContainsKey('MaxSpeedMph'))             { $MaxSpeedMph             = [double]$settings['MaxSpeedMph'] }
+if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles') -and $settings.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
+if (-not $PSBoundParameters.ContainsKey('MaxSpeedMph')             -and $settings.ContainsKey('MaxSpeedMph'))             { $MaxSpeedMph             = [double]$settings['MaxSpeedMph'] }
 $roadFactor   = if ($settings.ContainsKey('RoadFactor'))   { [double]$settings['RoadFactor'] }   else { 1.25 }
 $tolerancePct = if ($settings.ContainsKey('TolerancePct')) { [double]$settings['TolerancePct'] } else { 0.20 }
 
