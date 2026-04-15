@@ -51,33 +51,288 @@ $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\MileageTrackerHelpers.ps1"
 
-# ---------------------------------------------------------------------------
-# Windows OCR -- extract the odometer reading from a photo
-# Returns a hashtable: @{ Reading = "47823"; Confidence = "ok"|"low:..."|"none"|"error:..." }
-# ---------------------------------------------------------------------------
+
+function New-PhotoContext {
+    <#
+    .SYNOPSIS
+        Creates the shared photo context object passed through the pipeline.
+
+    .DESCRIPTION
+        Initialises all fields to safe defaults so downstream functions can rely
+        on a consistent shape without defensive null checks.
+
+    .PARAMETER File
+        The FileInfo object for the source photo.
+
+    .OUTPUTS
+        pscustomobject with File, Exif, OCR, Location, Status, and Error fields.
+    #>
+    param(
+        [System.IO.FileInfo]$File
+    )
+    return [pscustomobject]@{
+        File = [pscustomobject]@{
+            FullName = $File.FullName
+            Name     = $File.Name
+        }
+        Exif = @{
+            RawLines  = @()
+            DateTime  = $null
+            DatePart  = $null
+            GPS = @{
+                Lat = $null
+                Lon = $null
+            }
+        }
+        OCR = [pscustomobject]@{
+            Reading    = $null
+            Confidence = $null
+            RawText    = $null
+            Digits     = @()
+            Error      = $null
+        }
+        Location = $null
+        Status   = "Pending"
+        Error    = $null
+    }
+}
+
+function Get-ExifRawData {
+    <#
+    .SYNOPSIS
+        Invokes ExifTool and returns the raw output lines for a single file.
+
+    .DESCRIPTION
+        Runs ExifTool with -s3 (value-only) to extract DateTimeOriginal,
+        GPSLatitude, and GPSLongitude. Blank lines are filtered out so callers
+        can rely on index-based access.
+
+    .PARAMETER ExifToolPath
+        Full path to the exiftool executable.
+
+    .PARAMETER FilePath
+        Full path to the photo file to inspect.
+
+    .OUTPUTS
+        String array: [0] DateTimeOriginal, [1] GPSLatitude, [2] GPSLongitude.
+        The array may be shorter if fields are absent.
+    #>
+    param (
+        [string]$ExifToolPath,
+        [string]$FilePath
+    )
+
+    $exifOut = & $ExifToolPath -s3 -DateTimeOriginal -GPSLatitude# -GPSLongitude# "$FilePath" 2>&1
+
+    return @($exifOut | Where-Object { $_ -match '\S' })
+}
+
+function Add-ExifDateTimeToPhotoContext {
+    <#
+    .SYNOPSIS
+        Parses DateTimeOriginal from ExifTool output and enriches the context.
+
+    .DESCRIPTION
+        Stores the raw ExifTool lines on the context, then parses ExifLines[0]
+        as a DateTimeOriginal value (yyyy:MM:dd HH:mm:ss). Sets Exif.DateTime
+        (a [datetime]) and Exif.DatePart (the yyMMdd-hhmm filename prefix).
+        Sets Status="Skip" and returns $false if the field is absent or malformed.
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .PARAMETER ExifLines
+        Raw output lines from Get-ExifRawData.
+
+    .OUTPUTS
+        Boolean. $true on success; $false if DateTimeOriginal is absent or unparseable.
+    #>
+    param (
+        [pscustomobject]$Photo,
+        [string[]]$ExifLines
+    )
+
+    $Photo.Exif.RawLines = $ExifLines
+
+    # --- validate DateTimeOriginal
+    if ($ExifLines.Count -lt 1 -or $ExifLines[0] -notmatch '^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}') {
+        $Photo.Status = "Skip"
+        $Photo | Add-Member -NotePropertyName Error -NotePropertyValue "EXIF missing DateTimeOriginal" -Force
+        return $false
+    }
+
+    $dt = $ExifLines[0].Trim()
+
+    if ($dt -notmatch '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})') {
+        $Photo.Status = "Skip"
+        $Photo | Add-Member -NotePropertyName Error -NotePropertyValue "EXIF date unparseable: $dt" -Force
+        return $false
+    }
+
+    $year = [int]$matches[1]
+    $mm   = [int]$matches[2]
+    $dd   = [int]$matches[3]
+    $hh   = [int]$matches[4]
+    $mi   = [int]$matches[5]
+
+    $Photo.Exif.DateTime = [datetime]::new($year, $mm, $dd, $hh, $mi, 0)
+    $Photo.Exif.DatePart = ("{0:00}{1}{2}-{3}{4}" -f ($year % 100), $mm, $dd, $hh, $mi)
+
+    return $true
+}
+
+function Add-GpsToPhotoContext {
+    <#
+    .SYNOPSIS
+        Copies raw GPS latitude and longitude strings from ExifTool output into the context.
+
+    .DESCRIPTION
+        Assigns ExifLines[1] to Exif.GPS.Lat and ExifLines[2] to Exif.GPS.Lon when
+        present. GPS fields are stored as raw strings; Add-LocationToPhotoContext
+        is responsible for parsing and validating them.
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .PARAMETER ExifLines
+        Raw output lines from Get-ExifRawData.
+
+    .OUTPUTS
+        The same pscustomobject passed in (modified in place).
+    #>
+    param (
+        [pscustomobject]$Photo,
+        [string[]]$ExifLines
+    )
+
+    if ($ExifLines.Count -ge 3) {
+        $Photo.Exif.GPS.Lat = $ExifLines[1]
+        $Photo.Exif.GPS.Lon = $ExifLines[2]
+    }
+
+    return $Photo
+}
+
+function Add-LocationToPhotoContext {
+    <#
+    .SYNOPSIS
+        Matches GPS coordinates to the nearest known location by name.
+
+    .DESCRIPTION
+        Reads Exif.GPS.Lat and Exif.GPS.Lon from the context and calls
+        Get-NearestLocation. Sets Photo.Location to the matched location name,
+        or to FallbackLocation when no match is within ThresholdMiles.
+        Returns $false and sets Status="Skip" if GPS is absent or unparseable.
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .PARAMETER Locations
+        Array of location objects loaded from locations.json. Each must have
+        name, lat, and lon properties.
+
+    .PARAMETER ThresholdMiles
+        Maximum haversine distance in miles to count as a location match.
+
+    .PARAMETER FallbackLocation
+        Location name to assign when no known location is within ThresholdMiles.
+
+    .OUTPUTS
+        Boolean. $true on success (including fallback); $false if GPS is absent
+        or cannot be parsed as decimal degrees.
+    #>
+    param(
+        [pscustomobject]$Photo,
+        [array]         $Locations,
+        [double]        $ThresholdMiles,
+        [string]        $FallbackLocation
+    )
+
+    $lat = $Photo.Exif.GPS.Lat
+    $lon = $Photo.Exif.GPS.Lon
+
+    if ($null -eq $lat -or $null -eq $lon) {
+        $Photo.Status = "Skip"
+        $Photo.Error  = "GPS absent"
+        return $false
+    }
+
+    $latStr = $lat.ToString().Trim()
+    $lonStr = $lon.ToString().Trim()
+
+    if ($latStr -notmatch '^-?\d+(\.\d+)?$' -or $lonStr -notmatch '^-?\d+(\.\d+)?$') {
+        $Photo.Status = "Skip"
+        $Photo.Error  = "GPS unparseable: '$latStr', '$lonStr'"
+        return $false
+    }
+
+    $match = Get-NearestLocation -Lat ([double]$latStr) -Lon ([double]$lonStr) `
+                 -Locations $Locations -ThresholdMiles $ThresholdMiles
+
+    if ($match) {
+        $matchDist = Get-HaversineDistance ([double]$latStr) ([double]$lonStr) $match.lat $match.lon
+        Write-Verbose "  GPS matched '$($match.name)' at $([Math]::Round($matchDist, 3)) mi"
+        $Photo.Location = $match.name
+    }
+    else {
+        Write-Warning "  GPS ($latStr, $lonStr) did not match any known location within $ThresholdMiles mi - using '$FallbackLocation'"
+        $Photo.Location = $FallbackLocation
+    }
+
+    return $true
+}
 function Get-OdometerReading {
+    <#
+    .SYNOPSIS
+        Extracts the odometer reading from a photo using Windows OCR.
+
+    .DESCRIPTION
+        Loads the image via WinRT BitmapDecoder, runs it through OcrEngine, and
+        selects the longest digit run as the odometer value. The reading is
+        zero-padded to five digits when it is four or more digits long.
+
+        Requires Windows PowerShell 5.1. Returns Confidence="error" immediately
+        under PowerShell 6+, which lacks the required WinRT APIs.
+
+        Confidence values:
+          ok    - longest digit group is >= 4 digits; reading is reliable
+          low   - longest digit group is < 4 digits; reading may be partial
+          none  - OCR produced no digit groups at all
+          error - engine unavailable, PS version incompatible, or exception thrown
+
+    .PARAMETER ImagePath
+        Full path to the photo file to analyse.
+
+    .OUTPUTS
+        PSCustomObject with Reading (string), Confidence (string), RawText (string),
+        Digits (string[]), and Error (string) fields.
+    #>
     param([string]$ImagePath)
 
-    # WinRT type loading only works in Windows PowerShell 5.1, not PowerShell 7+
+    $result = [PSCustomObject]@{
+        Reading    = $null
+        Confidence = $null
+        RawText    = $null
+        Digits     = @()
+        Error      = $null
+    }
+
     if ($PSVersionTable.PSVersion.Major -ge 6) {
-        return @{ Reading = "00000"; Confidence = "error:OCR requires Windows PowerShell 5.1. Run: powershell.exe -File '$PSCommandPath'" }
+        $result.Confidence = "error"
+        $result.Error = "OCR requires Windows PowerShell 5.1"
+        return $result
     }
 
     try {
         Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
-        $null = [Windows.Media.Ocr.OcrEngine,             Windows.Foundation, ContentType=WindowsRuntime]
-        $null = [Windows.Media.Ocr.OcrResult,             Windows.Foundation, ContentType=WindowsRuntime]
-        $null = [Windows.Graphics.Imaging.BitmapDecoder,  Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
         $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType=WindowsRuntime]
 
-        # Reflection helper: await IAsyncOperation<T> -> T
         $asTaskMethod = [System.WindowsRuntimeSystemExtensions].GetMethods() |
             Where-Object {
-                $_.Name -eq 'AsTask' -and
-                $_.IsGenericMethod -and
-                $_.GetGenericArguments().Count -eq 1 -and
-                $_.GetParameters().Count -eq 1
+                $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1
             } | Select-Object -First 1
 
         function Invoke-WinRTAsync {
@@ -87,44 +342,189 @@ function Get-OdometerReading {
             return $task.Result
         }
 
-        # Open the file as a .NET stream and wrap it as IRandomAccessStream.
-        # This avoids StorageFile.OpenReadAsync() whose IAsyncOperation<IRandomAccessStream>
-        # return type cannot be cast from System.__ComObject in PS5.1 COM interop.
-        $absPath    = (Resolve-Path $ImagePath).Path
-        $netStream  = [System.IO.File]::OpenRead($absPath)
-        $winStream  = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($netStream)
-        $decoder    = Invoke-WinRTAsync ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($winStream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-        $bitmap     = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+        $absPath   = (Resolve-Path $ImagePath).Path
+        $netStream = [System.IO.File]::OpenRead($absPath)
+        $winStream = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($netStream)
+
+        $decoder = Invoke-WinRTAsync ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($winStream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $bitmap  = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+
         $winStream.Dispose()
         $netStream.Dispose()
 
         $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-        if ($null -eq $engine) {
-            return @{ Reading = "00000"; Confidence = "error:OCR engine unavailable" }
+        if (-not $engine) {
+            $result.Confidence = "error"
+            $result.Error = "OCR engine unavailable"
+            return $result
         }
 
         $ocrResult = Invoke-WinRTAsync ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-        $allText   = $ocrResult.Text
 
-        # Find all digit sequences; the longest is most likely the odometer
-        $digitMatches = [regex]::Matches($allText, '\d+')
+        $result.RawText = $ocrResult.Text
+
+        # --- digit extraction ------------------------------------------
+        $digitMatches = [regex]::Matches($result.RawText, '\d+')
+
         if ($digitMatches.Count -eq 0) {
-            return @{ Reading = "00000"; Confidence = "none" }
+            $result.Confidence = "none"
+            return $result
         }
 
-        $best = $digitMatches | Sort-Object { $_.Length } | Select-Object -Last 1
+        $digits = $digitMatches | ForEach-Object { $_.Value }
+        $result.Digits = $digits
+
+        $best = $digitMatches | Sort-Object Length | Select-Object -Last 1
 
         if ($best.Length -ge 4) {
-            return @{ Reading = $best.Value.PadLeft(5, '0'); Confidence = "ok" }
+            $result.Reading = $best.Value.PadLeft(5, '0')
+            $result.Confidence = "ok"
         }
         else {
-            $allSeqs = ($digitMatches | ForEach-Object { $_.Value }) -join ","
-            return @{ Reading = "00000"; Confidence = "low:$allSeqs" }
+            $result.Reading = $best.Value
+            $result.Confidence = "low"
         }
+
+        return $result
     }
     catch {
-        return @{ Reading = "00000"; Confidence = "error:$($_.Exception.Message)" }
+        $result.Confidence = "error"
+        $result.Error = $_.Exception.Message
+        return $result
     }
+}
+
+function Add-OcrToPhotoContext {
+    <#
+    .SYNOPSIS
+        Runs Windows OCR on the photo image and populates all OCR fields on the context.
+
+    .DESCRIPTION
+        Delegates to Get-OdometerReading and copies every result field onto
+        Photo.OCR (Reading, Confidence, RawText, Digits, Error). Does not return
+        a value; callers inspect Photo.OCR.Confidence to decide whether to proceed.
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .OUTPUTS
+        None. Modifies Photo.OCR in place.
+    #>
+    param(
+        [pscustomobject]$Photo
+    )
+
+    $result = Get-OdometerReading -ImagePath $Photo.File.FullName
+    $Photo.OCR.Reading    = $result.Reading
+    $Photo.OCR.Confidence = $result.Confidence
+    $Photo.OCR.RawText    = $result.RawText
+    $Photo.OCR.Digits     = $result.Digits
+    $Photo.OCR.Error      = $result.Error
+}
+
+function Test-OdometerReading {
+    <#
+    .SYNOPSIS
+        Validates the OCR reading for plausibility against the previous known-good odometer.
+
+    .DESCRIPTION
+        Computes the maximum allowable reading as LastOdometer + (GapSinceLastGood + 1)
+        * MaxTripMiles. Flags the reading as suspect if it is less than LastOdometer or
+        exceeds the maximum. Sets Photo.OCR.Confidence, Photo.Status, and Photo.Error
+        on failure. Always passes when LastOdometer is $null (first reading).
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .PARAMETER LastOdometer
+        The most recently accepted odometer reading, or $null if none exists yet.
+        Typed as [object] to preserve $null through the call; do not pass [int].
+
+    .PARAMETER GapSinceLastGood
+        Number of photos skipped since the last accepted reading. Widens the
+        allowable delta to account for trips that were not captured.
+
+    .PARAMETER MaxTripMiles
+        Maximum plausible miles for a single trip leg.
+
+    .OUTPUTS
+        Boolean. $true if the reading is plausible; $false if it is suspect.
+    #>
+    param(
+        [pscustomobject]$Photo,
+        [object]        $LastOdometer,
+        [int]           $GapSinceLastGood,
+        [int]           $MaxTripMiles
+    )
+
+    $reading  = [int]$Photo.OCR.Reading
+    $maxDelta = ($GapSinceLastGood + 1) * $MaxTripMiles
+
+    Write-Verbose "  Odometer check: read=$reading prev=$LastOdometer maxDelta=$maxDelta"
+
+    if ($null -ne $LastOdometer -and ($reading -lt $LastOdometer -or $reading -gt ($LastOdometer + $maxDelta))) {
+        $Photo.OCR.Confidence = "suspect:got=$reading,prev=$LastOdometer"
+        $Photo.Status         = "Skip"
+        $Photo.Error          = "Odometer suspect: read $reading, previous was $LastOdometer (max delta $maxDelta mi)"
+        return $false
+    }
+
+    return $true
+}
+
+function Invoke-PhotoRename {
+    <#
+    .SYNOPSIS
+        Builds the target filename, checks for collisions, then renames and moves the file.
+
+    .DESCRIPTION
+        Derives the new name from Photo.Exif.DatePart, Photo.Location, and
+        Photo.OCR.Reading. Derives the destination subfolder from Photo.Exif.DateTime
+        formatted with SortFolderFormat. If the target path already exists, sets
+        Status="Skip" and returns $null. Supports -WhatIf and -Confirm via
+        ShouldProcess; returns $null without modifying Status when suppressed by -WhatIf.
+
+    .PARAMETER Photo
+        The photo context object created by New-PhotoContext.
+
+    .PARAMETER OutputFolder
+        Root folder under which the dated subfolder is created.
+
+    .PARAMETER SortFolderFormat
+        A .NET date format string (e.g. "yyyy/yyMM") used to build the subfolder path.
+
+    .OUTPUTS
+        String. The full path of the renamed file, or $null on collision or -WhatIf.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [pscustomobject]$Photo,
+        [string]        $OutputFolder,
+        [string]        $SortFolderFormat
+    )
+
+    $newName    = "$($Photo.Exif.DatePart) $($Photo.Location) $($Photo.OCR.Reading).jpg"
+    $destFolder = Join-Path $OutputFolder $Photo.Exif.DateTime.ToString($SortFolderFormat, [System.Globalization.CultureInfo]::InvariantCulture)
+    $newPath    = Join-Path $destFolder $newName
+
+    if (Test-Path $newPath) {
+        Write-Warning "  Target already exists: $newName - skipping $($Photo.File.Name)"
+        $Photo.Status = "Skip"
+        $Photo.Error  = "Target already exists: $newName"
+        return $null
+    }
+
+    if ($PSCmdlet.ShouldProcess($Photo.File.FullName, "Rename to $newName and move to $destFolder")) {
+        $renamedPath = Join-Path (Split-Path $Photo.File.FullName -Parent) $newName
+        Rename-Item -Path $Photo.File.FullName -NewName $newName
+        if (-not (Test-Path $destFolder)) { New-Item -ItemType Directory -Path $destFolder | Out-Null }
+        Move-Item -Path $renamedPath -Destination $destFolder
+        Write-Information "  Renamed and moved -> $newPath" -InformationAction Continue
+        $Photo.Status = "Renamed"
+        return $newPath
+    }
+
+    return $null
 }
 
 # ---------------------------------------------------------------------------
@@ -150,6 +550,21 @@ $s.PSObject.Properties | ForEach-Object { $settings[$_.Name] = $_.Value }
 $paths = if ($s.PSObject.Properties['Paths']) { $s.Paths } else { $null }
 
 function Resolve-RelativeSetting {
+    <#
+    .SYNOPSIS
+        Resolves a settings.json value to an absolute path.
+
+    .DESCRIPTION
+        Looks up Key in the $settings hashtable. If the value is already an
+        absolute path it is returned as-is; otherwise it is resolved relative
+        to the directory that contains settings.json.
+
+    .PARAMETER Key
+        The settings hashtable key whose value should be resolved.
+
+    .OUTPUTS
+        String. The absolute path for the setting value.
+    #>
     param([string]$Key)
     $raw = $settings[$Key]
     if ([System.IO.Path]::IsPathRooted($raw)) { return $raw }
@@ -192,7 +607,6 @@ if (@($locations).Count -eq 0) {
     Write-Error "locations.json must contain at least one entry: $LocationsJson"
     exit 1
 }
-
 $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths.Output) {
     $paths.Output
 } else { $Source }
@@ -206,12 +620,8 @@ $logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) 
     $paths.Logs
 } else { Join-Path $PSScriptRoot "..\logs" }
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
-$transcriptPath = Join-Path $logsDir "rename-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-Start-Transcript -Path $transcriptPath -Append | Out-Null
 
 Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
-
-try {
 
 $logEntries       = @()
 $lastOdometer     = $null
@@ -233,6 +643,9 @@ if (Test-Path $logFile) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Data pipeline
+# ---------------------------------------------------------------------------
 $photos = Get-ChildItem -Path $Source -Filter "IMG_*.jpeg"
 if ($photos.Count -eq 0) {
     Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
@@ -243,128 +656,72 @@ foreach ($file in $photos) {
 
     Write-Information "Processing $($file.Name)..." -InformationAction Continue
 
-    # --- EXIF: date/time and GPS ----------------------------------------
-    $exifOut = & $ExifToolPath -s3 -DateTimeOriginal -GPSLatitude# -GPSLongitude# "$($file.FullName)" 2>&1
-    $exifLines = @($exifOut | Where-Object { $_ -match '\S' })
+    # 1. Create context
+    $photo = New-PhotoContext -File $file
+
+    # 2. EXIF extraction
+    $exifLines = Get-ExifRawData -ExifToolPath $ExifToolPath -FilePath $file.FullName
     Write-Verbose "  EXIF raw output ($($exifLines.Count) lines): $($exifLines -join ' | ')"
 
-    if ($exifLines.Count -lt 1 -or $exifLines[0] -notmatch '^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}') {
-        Write-Warning "  No DateTimeOriginal - skipping $($file.Name)"
-        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "EXIF: DateTimeOriginal missing or unreadable" })
+    # 3. DateTime enrichment
+    if (-not (Add-ExifDateTimeToPhotoContext -Photo $photo -ExifLines $exifLines)) {
+        Write-Warning "Skipping $($photo.File.Name): $($photo.Error)"
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = $photo.Error })
         continue
     }
 
-    $dateTimeRaw = $exifLines[0].Trim()   # e.g. "2026:03:01 14:32:15"
-    Write-Verbose "  EXIF DateTimeOriginal: $dateTimeRaw"
-    if ($dateTimeRaw -match '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})') {
-        $yy   = $matches[1].Substring(2, 2)
-        $mm   = $matches[2]
-        $dd   = $matches[3]
-        $hh   = $matches[4]
-        $mi   = $matches[5]
-        $datePart  = "$yy$mm$dd-$hh$mi"   # e.g. "260301-1432"
-        $photoDate = [DateTime]::new([int]$matches[1], [int]$mm, [int]$dd, [int]$hh, [int]$mi, 0)
-    }
-    else {
-        Write-Warning "  Could not parse date from '$dateTimeRaw' - skipping $($file.Name)"
-        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "EXIF: date unparseable: '$dateTimeRaw'" })
+    # 4. GPS enrichment
+    $null = Add-GpsToPhotoContext -Photo $photo -ExifLines $exifLines
+
+    # 5. Location matching
+    if (-not (Add-LocationToPhotoContext -Photo $photo -Locations $locations -ThresholdMiles $ProximityThresholdMiles -FallbackLocation $fallbackLocation)) {
+        Write-Warning "Skipping $($photo.File.Name): $($photo.Error)"
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = $photo.Error })
         continue
     }
 
-    # --- GPS proximity matching -----------------------------------------
-    $locationName = $fallbackLocation
-    $gpsLat       = ""
-    $gpsLon       = ""
+    # 6. OCR reading
+    Add-OcrToPhotoContext -Photo $photo
+    Write-Verbose "  OCR result: reading=$($photo.OCR.Reading) confidence=$($photo.OCR.Confidence)"
 
-    if ($exifLines.Count -ge 3) {
-        $latStr = $exifLines[1].Trim()
-        $lonStr = $exifLines[2].Trim()
-        Write-Verbose "  GPS raw: lat=$latStr lon=$lonStr"
-        if ($latStr -match '^-?\d+(\.\d+)?$' -and $lonStr -match '^-?\d+(\.\d+)?$') {
-            $gpsLat = $latStr
-            $gpsLon = $lonStr
-            $match  = Get-NearestLocation -Lat ([double]$latStr) -Lon ([double]$lonStr) `
-                          -Locations $locations -ThresholdMiles $ProximityThresholdMiles
-            if ($match) {
-                $matchDist = Get-HaversineDistance ([double]$latStr) ([double]$lonStr) $match.lat $match.lon
-                Write-Verbose "  GPS matched '$($match.name)' at $([Math]::Round($matchDist,3)) mi"
-                $locationName = $match.name
-            }
-            else {
-                Write-Warning "  GPS ($latStr, $lonStr) did not match any known location within $ProximityThresholdMiles mi - using '$fallbackLocation'"
-            }
-        }
-        else {
-            Write-Warning "  GPS data unparseable in $($file.Name) - skipping"
-            $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "GPS unparseable: '$latStr', '$lonStr'" })
-            continue
-        }
-    }
-    else {
-        Write-Warning "  No GPS data in $($file.Name) - skipping"
-        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "GPS absent" })
-        continue
-    }
-
-    # --- OCR: odometer reading ------------------------------------------
-    $ocr = Get-OdometerReading -ImagePath $file.FullName
-    Write-Verbose "  OCR result: reading=$($ocr.Reading) confidence=$($ocr.Confidence)"
-    if ($ocr.Confidence -eq 'ok') {
-        $reading  = [int]$ocr.Reading
-        $maxDelta = ($gapSinceLastGood + 1) * $MaxTripMiles
-        Write-Verbose "  Odometer check: read=$reading prev=$lastOdometer maxDelta=$maxDelta"
-        if ($null -ne $lastOdometer -and ($reading -lt $lastOdometer -or $reading -gt ($lastOdometer + $maxDelta))) {
-            Write-Warning "  Odometer suspect: read $reading, previous was $lastOdometer (max delta $maxDelta mi)"
-            $ocr = @{ Reading = "00000"; Confidence = "suspect:got=$reading,prev=$lastOdometer" }
-        }
-        else {
-            $lastOdometer     = $reading
-            $gapSinceLastGood = 0
-        }
-    }
-    else {
+    if ($photo.OCR.Confidence -ne 'ok') {
+        Write-Warning "  OCR confidence '$($photo.OCR.Confidence)' for $($photo.File.Name) - skipping"
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = "OCR: $($photo.OCR.Confidence)" })
         $gapSinceLastGood++
-    }
-    if ($ocr.Confidence -ne 'ok') {
-        Write-Warning "  OCR confidence '$($ocr.Confidence)' for $($file.Name) - skipping"
-        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "OCR: $($ocr.Confidence)" })
         continue
     }
 
-    # --- Build new filename and destination subfolder -------------------
-    $newName    = "$datePart $locationName $($ocr.Reading).jpg"
-    $destFolder = Join-Path $outputFolder $photoDate.ToString($sortFolderFormat, [CultureInfo]::InvariantCulture)
-    $newPath    = Join-Path $destFolder $newName
-
-    # Skip rather than overwrite an existing file
-    if (Test-Path $newPath) {
-        Write-Warning "  Target already exists: $newName - skipping $($file.Name)"
-        $skipped.Add([PSCustomObject]@{ File = $file.Name; Reason = "Target already exists: $newName" })
+    # 7. Odometer validation
+    if (-not (Test-OdometerReading -Photo $photo -LastOdometer $lastOdometer -GapSinceLastGood $gapSinceLastGood -MaxTripMiles $MaxTripMiles)) {
+        Write-Warning "  $($photo.Error)"
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = $photo.Error })
+        $gapSinceLastGood++
         continue
     }
+    $lastOdometer     = [int]$photo.OCR.Reading
+    $gapSinceLastGood = 0
 
-    # --- Rename, sort, and log ------------------------------------------
-    if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to $newName and move to $destFolder")) {
-        $renamedPath = Join-Path (Split-Path $file.FullName -Parent) $newName
-        Rename-Item -Path $file.FullName -NewName $newName
-        if (-not (Test-Path $destFolder)) { New-Item -ItemType Directory -Path $destFolder | Out-Null }
-        Move-Item -Path $renamedPath -Destination $destFolder
-        Write-Information "  Renamed and moved -> $newPath" -InformationAction Continue
-        $renamedCount++
-
-        $logEntries += [PSCustomObject]@{
-            OriginalFile       = $file.Name
-            NewFile            = $newName
-            DestinationPath    = $newPath
-            DateTimeOriginal   = $dateTimeRaw
-            Location           = $locationName
-            Odometer           = $ocr.Reading
-            OdometerConfidence = $ocr.Confidence
-            GPSLat             = $gpsLat
-            GPSLon             = $gpsLon
-        }
-        $logEntries | ConvertTo-Json | Out-File $logFile -Encoding utf8
+    # 8. Rename and move
+    $newPath = Invoke-PhotoRename -Photo $photo -OutputFolder $outputFolder -SortFolderFormat $sortFolderFormat
+    if ($photo.Status -eq "Skip") {
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = $photo.Error })
+        continue
     }
+    if (-not $newPath) { continue }  # WhatIf
+
+    $renamedCount++
+    $logEntries += [PSCustomObject]@{
+        OriginalFile       = $photo.File.Name
+        NewFile            = [System.IO.Path]::GetFileName($newPath)
+        DestinationPath    = $newPath
+        DateTimeOriginal   = $photo.Exif.RawLines[0]
+        Location           = $photo.Location
+        Odometer           = $photo.OCR.Reading
+        OdometerConfidence = $photo.OCR.Confidence
+        GPSLat             = $photo.Exif.GPS.Lat
+        GPSLon             = $photo.Exif.GPS.Lon
+    }
+    $logEntries | ConvertTo-Json | Out-File $logFile -Encoding utf8
 }
 
 $processedCount = @($photos | Where-Object { $_.Name -notmatch '^\d{6}-\d{4} ' }).Count
@@ -380,7 +737,3 @@ if ($skipped.Count -gt 0) {
 }
 Write-Information "  Log       : $logFile" -InformationAction Continue
 Write-Information "[Rename-Photos] Done." -InformationAction Continue
-
-} finally {
-    Stop-Transcript | Out-Null
-}
