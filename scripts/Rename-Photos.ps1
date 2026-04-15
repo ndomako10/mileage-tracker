@@ -27,9 +27,9 @@
 .PARAMETER ProximityThresholdMiles
     Maximum distance in miles from a known location to count as a match.
 
-.PARAMETER MaxTripMiles
-    Maximum plausible miles for a single trip. OCR readings that exceed the previous known-good
-    odometer by more than (gaps + 1) * MaxTripMiles are flagged as suspect.
+.PARAMETER MaxSpeedMph
+    Maximum plausible vehicle speed in mph. Used with the elapsed time since the last accepted
+    reading to compute an upper bound on the expected odometer delta.
 
 .EXAMPLE
     .\Rename-Photos.ps1 -WhatIf
@@ -43,7 +43,7 @@ param(
     [string]$LocationsJson           = "$PSScriptRoot\..\config\locations.json",
     [string]$ExifToolPath            = "$PSScriptRoot\..\exiftool-13.53_64\exiftool.exe",
     [double]$ProximityThresholdMiles = 1.0,
-    [int]$MaxTripMiles               = 250
+    [double]$MaxSpeedMph             = 80
 )
 
 Set-StrictMode -Version Latest
@@ -288,8 +288,7 @@ function Get-OdometerReading {
 
     .DESCRIPTION
         Loads the image via WinRT BitmapDecoder, runs it through OcrEngine, and
-        selects the longest digit run as the odometer value. The reading is
-        zero-padded to five digits when it is four or more digits long.
+        selects the longest digit run as the odometer value.
 
         Requires Windows PowerShell 5.1. Returns Confidence="error" immediately
         under PowerShell 6+, which lacks the required WinRT APIs.
@@ -377,7 +376,7 @@ function Get-OdometerReading {
         $best = $digitMatches | Sort-Object Length | Select-Object -Last 1
 
         if ($best.Length -ge 4) {
-            $result.Reading = $best.Value.PadLeft(5, '0')
+            $result.Reading = $best.Value
             $result.Confidence = "ok"
         }
         else {
@@ -425,48 +424,157 @@ function Add-OcrToPhotoContext {
 function Test-OdometerReading {
     <#
     .SYNOPSIS
-        Validates the OCR reading for plausibility against the previous known-good odometer.
+        Validates and, where possible, recovers the OCR odometer reading.
 
     .DESCRIPTION
-        Computes the maximum allowable reading as LastOdometer + (GapSinceLastGood + 1)
-        * MaxTripMiles. Flags the reading as suspect if it is less than LastOdometer or
-        exceeds the maximum. Sets Photo.OCR.Confidence, Photo.Status, and Photo.Error
-        on failure. Always passes when LastOdometer is $null (first reading).
+        Three-stage validation:
+
+        1. Time bound — if LastGoodDateTime is known, the reading must fall in
+           [LastOdometer, LastOdometer + ceil(elapsedHours * MaxSpeedMph)].
+           Without a prior DateTime, only the lower bound (>= LastOdometer) is enforced.
+
+        2. Location cross-check — when the reading exceeds the time bound but both
+           the previous and current locations are known and differ, the odometer
+           delta is compared to the expected road distance (haversine * RoadFactor).
+           A delta within TolerancePct of expected auto-approves the reading.
+
+        3. Digit recovery — when OCR confidence is "low" and a time bound is
+           available, each digit group in OCR.Digits is treated as a potential
+           suffix of the true reading. All integers in [LastOdometer, maxAllowable]
+           whose last N digits match the group are collected. If exactly one unique
+           candidate emerges across all groups it is accepted with
+           Confidence="recovered". Zero or multiple candidates cause the photo to
+           be skipped.
+
+        Always returns $true when LastOdometer is $null (first reading).
 
     .PARAMETER Photo
         The photo context object created by New-PhotoContext.
 
     .PARAMETER LastOdometer
         The most recently accepted odometer reading, or $null if none exists yet.
-        Typed as [object] to preserve $null through the call; do not pass [int].
+        Typed as [object] to preserve $null through the call.
 
-    .PARAMETER GapSinceLastGood
-        Number of photos skipped since the last accepted reading. Widens the
-        allowable delta to account for trips that were not captured.
+    .PARAMETER LastGoodDateTime
+        The DateTime of the last accepted reading, or $null if none exists yet.
+        Typed as [object] to preserve $null through the call.
 
-    .PARAMETER MaxTripMiles
-        Maximum plausible miles for a single trip leg.
+    .PARAMETER LastGoodLocation
+        The location name of the last accepted reading, or $null if none exists yet.
+        Typed as [object] to preserve $null through the call.
+
+    .PARAMETER LocationMap
+        Hashtable of location name -> location object, from Get-LocationMap.
+
+    .PARAMETER MaxSpeedMph
+        Maximum plausible vehicle speed in mph, used to compute the upper time bound.
+
+    .PARAMETER RoadFactor
+        Multiplier applied to haversine distance to estimate road distance.
+
+    .PARAMETER TolerancePct
+        Fractional tolerance for location distance cross-check (default 0.20 = 20%).
 
     .OUTPUTS
-        Boolean. $true if the reading is plausible; $false if it is suspect.
+        Boolean. $true if the reading is valid or was recovered; $false otherwise.
     #>
     param(
         [pscustomobject]$Photo,
         [object]        $LastOdometer,
-        [int]           $GapSinceLastGood,
-        [int]           $MaxTripMiles
+        [object]        $LastGoodDateTime,
+        [object]        $LastGoodLocation,
+        [hashtable]     $LocationMap,
+        [double]        $MaxSpeedMph,
+        [double]        $RoadFactor   = 1.25,
+        [double]        $TolerancePct = 0.20
     )
 
-    $reading  = [int]$Photo.OCR.Reading
-    $maxDelta = ($GapSinceLastGood + 1) * $MaxTripMiles
+    # No prior reading — always pass
+    if ($null -eq $LastOdometer) { return $true }
 
-    Write-Verbose "  Odometer check: read=$reading prev=$LastOdometer maxDelta=$maxDelta"
+    $lastOdom = [int]$LastOdometer
 
-    if ($null -ne $LastOdometer -and ($reading -lt $LastOdometer -or $reading -gt ($LastOdometer + $maxDelta))) {
-        $Photo.OCR.Confidence = "suspect:got=$reading,prev=$LastOdometer"
-        $Photo.Status         = "Skip"
-        $Photo.Error          = "Odometer suspect: read $reading, previous was $LastOdometer (max delta $maxDelta mi)"
+    # --- compute upper bound --------------------------------------------------
+    $maxAllowable = $null
+    if ($null -ne $LastGoodDateTime) {
+        $elapsed      = ($Photo.Exif.DateTime - [datetime]$LastGoodDateTime).TotalHours
+        $maxAllowable = [int]($lastOdom + [Math]::Ceiling($elapsed * $MaxSpeedMph))
+        Write-Verbose "  Time bound: elapsed=$([Math]::Round($elapsed, 2))h maxAllowable=$maxAllowable"
+    }
+
+    # --- digit recovery for low-confidence readings ---------------------------
+    if ($Photo.OCR.Confidence -eq 'low') {
+        if ($null -eq $maxAllowable) {
+            $Photo.Status = "Skip"
+            $Photo.Error  = "OCR low confidence; no time reference available for digit recovery"
+            return $false
+        }
+
+        $candidates = [System.Collections.Generic.List[int]]::new()
+        foreach ($group in $Photo.OCR.Digits) {
+            $groupLen = $group.Length
+            $modulus  = [int][Math]::Pow(10, $groupLen)
+            $suffix   = [int]$group
+            $rem      = $lastOdom % $modulus
+            $delta    = ($suffix - $rem + $modulus) % $modulus
+            $n        = $lastOdom + $delta
+            while ($n -le $maxAllowable) {
+                $candidates.Add($n)
+                $n += $modulus
+            }
+        }
+
+        $unique = @($candidates | Sort-Object -Unique)
+        Write-Verbose "  Digit recovery: candidates=$($unique -join ', ')"
+
+        if ($unique.Count -eq 1) {
+            $Photo.OCR.Reading    = $unique[0].ToString()
+            $Photo.OCR.Confidence = "recovered"
+            Write-Verbose "  Recovered reading: $($Photo.OCR.Reading)"
+            return $true
+        }
+
+        $Photo.Status = "Skip"
+        $Photo.Error  = if ($unique.Count -eq 0) {
+            "Digit recovery: no candidate in time window [$lastOdom, $maxAllowable]"
+        } else {
+            "Digit recovery: $($unique.Count) ambiguous candidates ($($unique -join ', '))"
+        }
         return $false
+    }
+
+    # --- validate ok-confidence reading ---------------------------------------
+    $reading = [int]$Photo.OCR.Reading
+    Write-Verbose "  Odometer check: read=$reading prev=$lastOdom$(if ($null -ne $maxAllowable) { " max=$maxAllowable" })"
+
+    if ($reading -lt $lastOdom) {
+        $Photo.OCR.Confidence = "suspect"
+        $Photo.Status         = "Skip"
+        $Photo.Error          = "Odometer decreased: read $reading, previous was $lastOdom"
+        return $false
+    }
+
+    if ($null -ne $maxAllowable -and $reading -gt $maxAllowable) {
+        # Try location cross-check before rejecting
+        $crossCheckPassed = $false
+        if ($LastGoodLocation -and $Photo.Location -and $Photo.Location -ne $LastGoodLocation) {
+            $expected = Get-ExpectedDistance ([string]$LastGoodLocation) $Photo.Location $LocationMap $RoadFactor
+            if ($expected -gt 0) {
+                $deviation = [Math]::Abs(($reading - $lastOdom) - $expected) / $expected
+                Write-Verbose "  Location cross-check: delta=$($reading - $lastOdom) expected=$expected deviation=$([Math]::Round($deviation * 100, 1))%"
+                if ($deviation -le $TolerancePct) {
+                    $crossCheckPassed = $true
+                    Write-Verbose "  Location cross-check auto-approved reading"
+                }
+            }
+        }
+
+        if (-not $crossCheckPassed) {
+            $Photo.OCR.Confidence = "suspect"
+            $Photo.Status         = "Skip"
+            $Photo.Error          = "Odometer out of time range: read $reading, expected <= $maxAllowable (prev $lastOdom)"
+            return $false
+        }
     }
 
     return $true
@@ -577,7 +685,9 @@ $Source = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Sourc
 if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $LocationsJson           = Resolve-RelativeSetting 'LocationsJson' }
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
 if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
-if (-not $PSBoundParameters.ContainsKey('MaxTripMiles'))            { $MaxTripMiles            = [int]$settings['MaxTripMiles'] }
+if (-not $PSBoundParameters.ContainsKey('MaxSpeedMph'))             { $MaxSpeedMph             = [double]$settings['MaxSpeedMph'] }
+$roadFactor   = if ($settings.ContainsKey('RoadFactor'))   { [double]$settings['RoadFactor'] }   else { 1.25 }
+$tolerancePct = if ($settings.ContainsKey('TolerancePct')) { [double]$settings['TolerancePct'] } else { 0.20 }
 
 $fallbackLocation = if ($settings.ContainsKey('FallbackLocation') -and $settings['FallbackLocation']) {
     $settings['FallbackLocation']
@@ -607,6 +717,8 @@ if (@($locations).Count -eq 0) {
     Write-Error "locations.json must contain at least one entry: $LocationsJson"
     exit 1
 }
+$locationMap = Get-LocationMap -Locations $locations
+
 $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths.Output) {
     $paths.Output
 } else { $Source }
@@ -614,7 +726,9 @@ $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths
 $reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.Reports) {
     $paths.Reports
 } else { Join-Path $PSScriptRoot "..\logs" }
-$logFile = Join-Path $reportsDir "rename-log.json"
+if (-not (Test-Path $reportsDir)) { New-Item -ItemType Directory -Path $reportsDir | Out-Null }
+$runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$logFile  = Join-Path $reportsDir "rename-log-$runStamp.json"
 
 $logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
     $paths.Logs
@@ -623,23 +737,26 @@ if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | O
 
 Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
 
-$logEntries       = @()
 $lastOdometer     = $null
-$gapSinceLastGood = 0
+$lastGoodDateTime = $null
+$lastGoodLocation = $null
+$logEntries       = @()
 $skipped          = [System.Collections.Generic.List[PSCustomObject]]::new()
 $renamedCount     = 0
 
-if (Test-Path $logFile) {
-    $loaded = Get-Content $logFile -Raw | ConvertFrom-Json
-    if ($null -ne $loaded) {
-        $logEntries = @($loaded)
-        $lastGood = $logEntries | Where-Object { $_.OdometerConfidence -eq 'ok' } | Select-Object -Last 1
+$existingLogs = @(Get-ChildItem -Path $reportsDir -Filter "rename-log-*.json" -ErrorAction SilentlyContinue | Sort-Object Name)
+if ($existingLogs.Count -gt 0) {
+    try {
+        $prevEntries = @(Get-Content $existingLogs[-1].FullName -Raw | ConvertFrom-Json)
+        $lastGood = $prevEntries | Where-Object { $_.OdometerConfidence -eq 'ok' -or $_.OdometerConfidence -eq 'recovered' } | Select-Object -Last 1
         if ($lastGood) {
-            $lastOdometer = [int]$lastGood.Odometer
-            # Count non-ok entries after the last good one
-            $lastGoodIndex = [array]::LastIndexOf($logEntries, $lastGood)
-            $gapSinceLastGood = $logEntries.Count - $lastGoodIndex - 1
+            $lastOdometer     = [int]$lastGood.Odometer
+            $lastGoodDateTime = [datetime]::ParseExact($lastGood.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)
+            $lastGoodLocation = $lastGood.Location
+            Write-Verbose "  Prior state: odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
         }
+    } catch {
+        Write-Warning "Could not load prior state from $($existingLogs[-1].Name): $($_.Exception.Message)"
     }
 }
 
@@ -684,22 +801,21 @@ foreach ($file in $photos) {
     Add-OcrToPhotoContext -Photo $photo
     Write-Verbose "  OCR result: reading=$($photo.OCR.Reading) confidence=$($photo.OCR.Confidence)"
 
-    if ($photo.OCR.Confidence -ne 'ok') {
-        Write-Warning "  OCR confidence '$($photo.OCR.Confidence)' for $($photo.File.Name) - skipping"
+    if ($photo.OCR.Confidence -eq 'none' -or $photo.OCR.Confidence -eq 'error') {
+        Write-Warning "  OCR $($photo.OCR.Confidence) for $($photo.File.Name) - skipping"
         $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = "OCR: $($photo.OCR.Confidence)" })
-        $gapSinceLastGood++
         continue
     }
 
     # 7. Odometer validation
-    if (-not (Test-OdometerReading -Photo $photo -LastOdometer $lastOdometer -GapSinceLastGood $gapSinceLastGood -MaxTripMiles $MaxTripMiles)) {
+    if (-not (Test-OdometerReading -Photo $photo -LastOdometer $lastOdometer -LastGoodDateTime $lastGoodDateTime -LastGoodLocation $lastGoodLocation -LocationMap $locationMap -MaxSpeedMph $MaxSpeedMph -RoadFactor $roadFactor -TolerancePct $tolerancePct)) {
         Write-Warning "  $($photo.Error)"
         $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = $photo.Error })
-        $gapSinceLastGood++
         continue
     }
     $lastOdometer     = [int]$photo.OCR.Reading
-    $gapSinceLastGood = 0
+    $lastGoodDateTime = $photo.Exif.DateTime
+    $lastGoodLocation = $photo.Location
 
     # 8. Rename and move
     $newPath = Invoke-PhotoRename -Photo $photo -OutputFolder $outputFolder -SortFolderFormat $sortFolderFormat

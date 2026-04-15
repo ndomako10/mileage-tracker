@@ -9,7 +9,7 @@
   "ExifToolPath": "exiftool-13.53_64\\exiftool.exe",
   "FallbackLocation": "Unknown",
   "ProximityThresholdMiles": 1.0,
-  "MaxTripMiles": 250,
+  "MaxSpeedMph": 80,
   "RoadFactor": 1.25,
   "TolerancePct": 0.20,
   "DuplicateWindowSeconds": 120,
