@@ -46,9 +46,6 @@ param(
     [double]$MaxSpeedMph             = 80
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
 . "$PSScriptRoot\MileageTrackerHelpers.ps1"
 
 
@@ -427,7 +424,7 @@ function Test-OdometerReading {
         Validates and, where possible, recovers the OCR odometer reading.
 
     .DESCRIPTION
-        Three-stage validation:
+        Four-stage validation:
 
         1. Time bound — if LastGoodDateTime is known, the reading must fall in
            [LastOdometer, LastOdometer + ceil(elapsedHours * MaxSpeedMph)].
@@ -438,13 +435,34 @@ function Test-OdometerReading {
            delta is compared to the expected road distance (haversine * RoadFactor).
            A delta within TolerancePct of expected auto-approves the reading.
 
-        3. Digit recovery — when OCR confidence is "low" and a time bound is
-           available, each digit group in OCR.Digits is treated as a potential
-           suffix of the true reading. All integers in [LastOdometer, maxAllowable]
-           whose last N digits match the group are collected. If exactly one unique
-           candidate emerges across all groups it is accepted with
-           Confidence="recovered". Zero or multiple candidates cause the photo to
-           be skipped.
+        3. Low-confidence digit recovery — when OCR confidence is "low" and a time
+           bound is available, each digit group in OCR.Digits is treated as a
+           potential suffix of the true reading. All integers in
+           [LastOdometer, maxAllowable] whose last N digits match the group are
+           collected. If exactly one unique candidate emerges across all groups it
+           is accepted with Confidence="recovered". Zero or multiple candidates
+           cause the photo to be skipped.
+
+        4. Decreased-reading recovery — when an ok-confidence reading is less than
+           LastOdometer (OCR dropped digits from either end, or split the number),
+           three independent passes are attempted in order, each returning
+           immediately on a unique find:
+
+             a. Concatenation — join all OCR.Digits groups in order; if the result
+                falls in [LastOdometer, maxAllowable] it is accepted.
+
+             b. Suffix — same algorithm as stage 3; values in range whose last N
+                digits match each group.
+
+             c. Prefix — values in [LastOdometer, maxAllowable] whose string
+                representation starts with each digit group. When multiple
+                candidates survive, a location-distance estimate is used to narrow
+                the field: candidates whose odometer delta falls within TolerancePct
+                of the haversine road distance are kept. Accepted only if exactly
+                one candidate remains.
+
+           Requires a time bound (maxAllowable) for all three passes. Photos are
+           skipped when no pass yields a unique candidate.
 
         Always returns $true when LastOdometer is $null (first reading).
 
@@ -548,9 +566,96 @@ function Test-OdometerReading {
     Write-Verbose "  Odometer check: read=$reading prev=$lastOdom$(if ($null -ne $maxAllowable) { " max=$maxAllowable" })"
 
     if ($reading -lt $lastOdom) {
+        # Require a time bound before attempting recovery
+        if ($null -eq $maxAllowable) {
+            $Photo.OCR.Confidence = "suspect"
+            $Photo.Status         = "Skip"
+            $Photo.Error          = "Odometer decreased: read $reading, previous was $lastOdom (no time reference for recovery)"
+            return $false
+        }
+
+        # --- Pass a: concatenation — join all digit groups in order -----------
+        $concat    = [string]::Join('', $Photo.OCR.Digits)
+        $concatVal = $null
+        if ($concat -match '^\d+$' -and [long]::TryParse($concat, [ref]$concatVal)) {
+            Write-Verbose "  Decreased recovery (concat): trying $concatVal"
+            if ($concatVal -ge $lastOdom -and $concatVal -le $maxAllowable) {
+                $Photo.OCR.Reading    = $concatVal.ToString()
+                $Photo.OCR.Confidence = "recovered"
+                Write-Verbose "  Recovered reading (concatenation): $($Photo.OCR.Reading)"
+                return $true
+            }
+        }
+
+        # --- Pass b: suffix — values in range ending in each digit group ------
+        $suffixCandidates = [System.Collections.Generic.List[int]]::new()
+        foreach ($group in $Photo.OCR.Digits) {
+            $groupLen = $group.Length
+            $modulus  = [int][Math]::Pow(10, $groupLen)
+            $suffix   = [int]$group
+            $rem      = $lastOdom % $modulus
+            $delta    = ($suffix - $rem + $modulus) % $modulus
+            $n        = $lastOdom + $delta
+            while ($n -le $maxAllowable) {
+                $suffixCandidates.Add($n)
+                $n += $modulus
+            }
+        }
+        $uniqueSuffix = @($suffixCandidates | Sort-Object -Unique)
+        Write-Verbose "  Decreased recovery (suffix): candidates=$($uniqueSuffix -join ', ')"
+        if ($uniqueSuffix.Count -eq 1) {
+            $Photo.OCR.Reading    = $uniqueSuffix[0].ToString()
+            $Photo.OCR.Confidence = "recovered"
+            Write-Verbose "  Recovered reading (suffix): $($Photo.OCR.Reading)"
+            return $true
+        }
+
+        # --- Pass c: prefix — values in range starting with each digit group --
+        $expectedLen      = $lastOdom.ToString().Length
+        $prefixCandidates = [System.Collections.Generic.List[int]]::new()
+        foreach ($group in $Photo.OCR.Digits) {
+            $missingDigits = $expectedLen - $group.Length
+            if ($missingDigits -le 0) { continue }
+            $scale    = [long][Math]::Pow(10, $missingDigits)
+            $pMin     = [long]([int]$group) * $scale
+            $pMax     = ([long]([int]$group) + 1L) * $scale - 1L
+            $rangeMin = [int][Math]::Max([long]$lastOdom, $pMin)
+            $rangeMax = [int][Math]::Min([long]$maxAllowable, $pMax)
+            for ($n = $rangeMin; $n -le $rangeMax; $n++) {
+                $prefixCandidates.Add($n)
+            }
+        }
+        $uniquePrefix = @($prefixCandidates | Sort-Object -Unique)
+        Write-Verbose "  Decreased recovery (prefix): $($uniquePrefix.Count) candidate(s)"
+
+        if ($uniquePrefix.Count -eq 1) {
+            $Photo.OCR.Reading    = $uniquePrefix[0].ToString()
+            $Photo.OCR.Confidence = "recovered"
+            Write-Verbose "  Recovered reading (prefix): $($Photo.OCR.Reading)"
+            return $true
+        }
+
+        if ($uniquePrefix.Count -gt 1 -and
+            $LastGoodLocation -and $Photo.Location -and
+            $Photo.Location -ne $LastGoodLocation) {
+            $expectedDist = Get-ExpectedDistance ([string]$LastGoodLocation) $Photo.Location $LocationMap $RoadFactor
+            if ($expectedDist -gt 0) {
+                $locationFiltered = @($uniquePrefix | Where-Object {
+                    [Math]::Abs($_ - $lastOdom - $expectedDist) / $expectedDist -le $TolerancePct
+                })
+                Write-Verbose "  Prefix + location: expected delta=$([Math]::Round($expectedDist)) filtered to $($locationFiltered.Count) candidate(s)"
+                if ($locationFiltered.Count -eq 1) {
+                    $Photo.OCR.Reading    = $locationFiltered[0].ToString()
+                    $Photo.OCR.Confidence = "recovered"
+                    Write-Verbose "  Recovered reading (prefix+location): $($Photo.OCR.Reading)"
+                    return $true
+                }
+            }
+        }
+
         $Photo.OCR.Confidence = "suspect"
         $Photo.Status         = "Skip"
-        $Photo.Error          = "Odometer decreased: read $reading, previous was $lastOdom"
+        $Photo.Error          = "Odometer decreased: read $reading, previous was $lastOdom; recovery failed"
         return $false
     }
 
@@ -638,6 +743,13 @@ function Invoke-PhotoRename {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Guard: when dot-sourced (e.g. by Pester), skip the main body so callers
+# can access the functions defined above without running the script.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
 # ---------------------------------------------------------------------------
 # Load settings.json; command-line params take precedence over file values

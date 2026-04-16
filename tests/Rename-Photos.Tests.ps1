@@ -4,8 +4,9 @@
     Pester tests for Rename-Photos.ps1 helper logic.
 
 .NOTES
-    Tests dot-source MileageTrackerHelpers.ps1 only -- no EXIF reads, OCR,
-    or file system side-effects involved in the pure-function tests.
+    Tests dot-source MileageTrackerHelpers.ps1 and Rename-Photos.ps1 (functions
+    only — the main body is guarded by an InvocationName check). No EXIF reads,
+    OCR, or file system side-effects are involved in the pure-function tests.
 
     The "-WhatIf does not write files" describe block runs the full script
     and requires config/settings.json to be present. It is automatically
@@ -15,11 +16,39 @@
 
 BeforeAll {
     . "$PSScriptRoot\..\scripts\MileageTrackerHelpers.ps1"
+    . "$PSScriptRoot\..\scripts\Rename-Photos.ps1"
 
     $script:testLocations = @(
         [PSCustomObject]@{ name = "Home"; lat = 44.0; lon = -84.0 },
         [PSCustomObject]@{ name = "Work"; lat = 43.0; lon = -85.0 }
     )
+    $script:locationMap = Get-LocationMap $script:testLocations
+
+    # Build a minimal photo context suitable for Test-OdometerReading.
+    # Callers only need to supply the fields the function actually reads.
+    function New-TestPhoto {
+        param(
+            [string]   $Reading,
+            [string]   $Confidence = 'ok',
+            [string[]] $Digits     = @($Reading),
+            [datetime] $DateTime   = [datetime]::Now,
+            [string]   $Location   = $null
+        )
+        return [pscustomobject]@{
+            File     = [pscustomobject]@{ Name = 'test.jpg' }
+            Exif     = @{ DateTime = $DateTime }
+            OCR      = [pscustomobject]@{
+                Reading    = $Reading
+                Confidence = $Confidence
+                RawText    = $null
+                Digits     = $Digits
+                Error      = $null
+            }
+            Location = $Location
+            Status   = 'Pending'
+            Error    = $null
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -84,6 +113,95 @@ Describe "New filename string construction" {
     It "does not alter an already 5-digit odometer reading" {
         $ocrReading = "47823".PadLeft(5, '0')
         $ocrReading | Should -Be "47823"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+Describe "Test-OdometerReading - decreased-reading recovery" {
+
+    BeforeAll {
+        # Shared params — use $script: so they are visible inside It blocks
+        $script:maxSpeedMph  = 80
+        $script:roadFactor   = 1.25
+        $script:tolerancePct = 0.20
+    }
+
+    It "skips when reading decreased and no LastGoodDateTime is available" {
+        $photo  = New-TestPhoto -Reading "2228" -Digits @("2228")
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 222841 -LastGoodDateTime $null -LastGoodLocation $null `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph
+        $result            | Should -BeFalse
+        $photo.OCR.Confidence | Should -Be "suspect"
+        $photo.Error       | Should -Match "no time reference"
+    }
+
+    It "recovers via concatenation when OCR splits the number into groups" {
+        # OCR read "2228" + "41" separately; true value is 222841
+        $t0    = [datetime]::Now.AddHours(-1)
+        $photo = New-TestPhoto -Reading "2228" -Digits @("2228", "41") -DateTime ([datetime]::Now)
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 222841 -LastGoodDateTime $t0 -LastGoodLocation $null `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph `
+            -RoadFactor $script:roadFactor -TolerancePct $script:tolerancePct
+        $result               | Should -BeTrue
+        $photo.OCR.Reading    | Should -Be "222841"
+        $photo.OCR.Confidence | Should -Be "recovered"
+    }
+
+    It "recovers via suffix when OCR drops leading digits" {
+        # OCR read "2841"; true value is 22841 (leading "2" dropped)
+        $t0    = [datetime]::Now.AddHours(-1)
+        $photo = New-TestPhoto -Reading "2841" -Digits @("2841") -DateTime ([datetime]::Now)
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 22841 -LastGoodDateTime $t0 -LastGoodLocation $null `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph `
+            -RoadFactor $script:roadFactor -TolerancePct $script:tolerancePct
+        $result               | Should -BeTrue
+        $photo.OCR.Reading    | Should -Be "22841"
+        $photo.OCR.Confidence | Should -Be "recovered"
+    }
+
+    It "recovers via prefix when the time window contains exactly one matching value" {
+        # lastOdom = maxAllowable (elapsed ~0s): only one prefix candidate exists
+        $t0    = [datetime]::Now
+        $photo = New-TestPhoto -Reading "999" -Digits @("999") -DateTime $t0
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 99900 -LastGoodDateTime $t0 -LastGoodLocation $null `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph `
+            -RoadFactor $script:roadFactor -TolerancePct $script:tolerancePct
+        $result               | Should -BeTrue
+        $photo.OCR.Reading    | Should -Be "99900"
+        $photo.OCR.Confidence | Should -Be "recovered"
+    }
+
+    It "recovers via prefix+location when distance estimate narrows candidates to one" {
+        # OCR read "100" (prefix of 10050); expected road distance is mocked to 50 miles.
+        # TolerancePct = 0.01 means ±0.5 miles, so only 10050 survives the filter.
+        Mock Get-ExpectedDistance { return 50.0 }
+        $t0    = [datetime]::Now.AddHours(-1)
+        $photo = New-TestPhoto -Reading "100" -Digits @("100") -DateTime ([datetime]::Now) -Location "Work"
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 10000 -LastGoodDateTime $t0 -LastGoodLocation "Home" `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph `
+            -RoadFactor $script:roadFactor -TolerancePct 0.01
+        $result               | Should -BeTrue
+        $photo.OCR.Reading    | Should -Be "10050"
+        $photo.OCR.Confidence | Should -Be "recovered"
+    }
+
+    It "skips when all recovery passes produce ambiguous candidates" {
+        # "100" prefix gives ~51 candidates in [10000,10050]; no location to narrow
+        $t0    = [datetime]::Now.AddHours(-0.625)   # ceil(0.625*80)=50 -> max=10050
+        $photo = New-TestPhoto -Reading "100" -Digits @("100") -DateTime ([datetime]::Now)
+        $result = Test-OdometerReading -Photo $photo `
+            -LastOdometer 10000 -LastGoodDateTime $t0 -LastGoodLocation $null `
+            -LocationMap $script:locationMap -MaxSpeedMph $script:maxSpeedMph `
+            -RoadFactor $script:roadFactor -TolerancePct $script:tolerancePct
+        $result            | Should -BeFalse
+        $photo.OCR.Confidence | Should -Be "suspect"
+        $photo.Error       | Should -Match "recovery failed"
     }
 }
 
