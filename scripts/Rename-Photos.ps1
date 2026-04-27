@@ -31,11 +31,18 @@
     Maximum plausible vehicle speed in mph. Used with the elapsed time since the last accepted
     reading to compute an upper bound on the expected odometer delta.
 
+.PARAMETER StartOdometer
+    Seeds the initial last-known odometer value when no prior state can be found via the
+    three-level fallback chain (rename-state.json, rename-log.json, output directory scan).
+    After the first real run completes, rename-state.json is written and this parameter is
+    never needed again.
+
 .EXAMPLE
     .\Rename-Photos.ps1 -WhatIf
     .\Rename-Photos.ps1
     .\Rename-Photos.ps1 -Source "D:\Photos\Odometer" -WhatIf
     .\Rename-Photos.ps1 -Confirm
+    .\Rename-Photos.ps1 -StartOdometer 224570
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -43,7 +50,8 @@ param(
     [string]$LocationsJson           = "$PSScriptRoot\..\config\locations.json",
     [string]$ExifToolPath            = "$PSScriptRoot\..\exiftool-13.53_64\exiftool.exe",
     [double]$ProximityThresholdMiles = 1.0,
-    [double]$MaxSpeedMph             = 80
+    [double]$MaxSpeedMph             = 80,
+    [int]   $StartOdometer
 )
 
 . "$PSScriptRoot\MileageTrackerHelpers.ps1"
@@ -287,6 +295,10 @@ function Get-OdometerReading {
         Loads the image via WinRT BitmapDecoder, runs it through OcrEngine, and
         selects the longest digit run as the odometer value.
 
+        Decodes the image at a configurable scale percentage before OCR. Downscaling
+        normalises digit size for close-up photos and smooths pixelation artefacts
+        from digital displays. Defaults to 25% (suitable for 4032x3024 source images).
+
         Requires Windows PowerShell 5.1. Returns Confidence="error" immediately
         under PowerShell 6+, which lacks the required WinRT APIs.
 
@@ -303,7 +315,10 @@ function Get-OdometerReading {
         PSCustomObject with Reading (string), Confidence (string), RawText (string),
         Digits (string[]), and Error (string) fields.
     #>
-    param([string]$ImagePath)
+    param(
+        [string]$ImagePath,
+        [int]   $ScalePct = 25
+    )
 
     $result = [PSCustomObject]@{
         Reading    = $null
@@ -322,9 +337,15 @@ function Get-OdometerReading {
     try {
         Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
-        $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
-        $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
-        $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Media.Ocr.OcrEngine,                     Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapDecoder,           Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.SoftwareBitmap,          Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapTransform,         Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapPixelFormat,       Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapAlphaMode,         Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.BitmapInterpolationMode, Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.ExifOrientationMode,     Windows.Foundation, ContentType=WindowsRuntime]
+        $null = [Windows.Graphics.Imaging.ColorManagementMode,     Windows.Foundation, ContentType=WindowsRuntime]
 
         $asTaskMethod = [System.WindowsRuntimeSystemExtensions].GetMethods() |
             Where-Object {
@@ -343,43 +364,46 @@ function Get-OdometerReading {
         $winStream = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($netStream)
 
         $decoder = Invoke-WinRTAsync ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($winStream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-        $bitmap  = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-
-        $winStream.Dispose()
-        $netStream.Dispose()
 
         $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
         if (-not $engine) {
+            $winStream.Dispose()
+            $netStream.Dispose()
             $result.Confidence = "error"
             $result.Error = "OCR engine unavailable"
             return $result
         }
 
-        $ocrResult = Invoke-WinRTAsync ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+        $scale              = [Math]::Min(1.0, $ScalePct / 100.0)
+        $transform              = [Windows.Graphics.Imaging.BitmapTransform]::new()
+        $transform.ScaledWidth  = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelWidth  * $scale))
+        $transform.ScaledHeight = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelHeight * $scale))
+        $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Linear
 
+        $bitmap = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync(
+            [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+            [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied,
+            $transform,
+            [Windows.Graphics.Imaging.ExifOrientationMode]::IgnoreExifOrientation,
+            [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
+        )) ([Windows.Graphics.Imaging.SoftwareBitmap])
+
+        $winStream.Dispose()
+        $netStream.Dispose()
+
+        $ocrResult  = Invoke-WinRTAsync ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
         $result.RawText = $ocrResult.Text
 
-        # --- digit extraction ------------------------------------------
         $digitMatches = [regex]::Matches($result.RawText, '\d+')
-
         if ($digitMatches.Count -eq 0) {
-            $result.Confidence = "none"
+            $result.Confidence = 'none'
             return $result
         }
 
-        $digits = $digitMatches | ForEach-Object { $_.Value }
-        $result.Digits = $digits
-
+        $result.Digits = @($digitMatches | ForEach-Object { $_.Value })
         $best = $digitMatches | Sort-Object Length | Select-Object -Last 1
-
-        if ($best.Length -ge 4) {
-            $result.Reading = $best.Value
-            $result.Confidence = "ok"
-        }
-        else {
-            $result.Reading = $best.Value
-            $result.Confidence = "low"
-        }
+        $result.Reading    = $best.Value
+        $result.Confidence = if ($best.Length -ge 4) { 'ok' } else { 'low' }
 
         return $result
     }
@@ -403,14 +427,19 @@ function Add-OcrToPhotoContext {
     .PARAMETER Photo
         The photo context object created by New-PhotoContext.
 
+    .PARAMETER OcrScalePct
+        Percentage of original image dimensions to decode at before running OCR.
+        Passed through to Get-OdometerReading.
+
     .OUTPUTS
         None. Modifies Photo.OCR in place.
     #>
     param(
-        [pscustomobject]$Photo
+        [pscustomobject]$Photo,
+        [int]           $OcrScalePct = 25
     )
 
-    $result = Get-OdometerReading -ImagePath $Photo.File.FullName
+    $result = Get-OdometerReading -ImagePath $Photo.File.FullName -ScalePct $OcrScalePct
     $Photo.OCR.Reading    = $result.Reading
     $Photo.OCR.Confidence = $result.Confidence
     $Photo.OCR.RawText    = $result.RawText
@@ -798,8 +827,9 @@ if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $Locations
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
 if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles') -and $settings.ContainsKey('ProximityThresholdMiles')) { $ProximityThresholdMiles = [double]$settings['ProximityThresholdMiles'] }
 if (-not $PSBoundParameters.ContainsKey('MaxSpeedMph')             -and $settings.ContainsKey('MaxSpeedMph'))             { $MaxSpeedMph             = [double]$settings['MaxSpeedMph'] }
-$roadFactor   = if ($settings.ContainsKey('RoadFactor'))   { [double]$settings['RoadFactor'] }   else { 1.25 }
-$tolerancePct = if ($settings.ContainsKey('TolerancePct')) { [double]$settings['TolerancePct'] } else { 0.20 }
+$roadFactor   = if ($settings.ContainsKey('RoadFactor'))      { [double]$settings['RoadFactor'] }      else { 1.25 }
+$tolerancePct = if ($settings.ContainsKey('TolerancePct'))    { [double]$settings['TolerancePct'] }    else { 0.20 }
+$ocrScalePct  = if ($settings.ContainsKey('OcrScalePercent')) { [int]$settings['OcrScalePercent'] }    else { 25 }
 
 $fallbackLocation = if ($settings.ContainsKey('FallbackLocation') -and $settings['FallbackLocation']) {
     $settings['FallbackLocation']
@@ -835,47 +865,82 @@ $outputFolder = if ($paths -and $paths.PSObject.Properties['Output'] -and $paths
     $paths.Output
 } else { $Source }
 
-$reportsDir = if ($paths -and $paths.PSObject.Properties['Reports'] -and $paths.Reports) {
-    $paths.Reports
-} else { Join-Path $PSScriptRoot "..\logs" }
-if (-not (Test-Path $reportsDir)) { New-Item -ItemType Directory -Path $reportsDir | Out-Null }
-$runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logFile  = Join-Path $reportsDir "rename-log-$runStamp.json"
-
 $logsDir = if ($paths -and $paths.PSObject.Properties['Logs'] -and $paths.Logs) {
     $paths.Logs
 } else { Join-Path $PSScriptRoot "..\logs" }
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
+$stateFile = Join-Path $logsDir "rename-state.json"
+$auditLog  = Join-Path $logsDir "rename-log.json"
 
 Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
 
 $lastOdometer     = $null
 $lastGoodDateTime = $null
 $lastGoodLocation = $null
-$logEntries       = @()
 $skipped          = [System.Collections.Generic.List[PSCustomObject]]::new()
 $renamedCount     = 0
 
-$existingLogs = @(Get-ChildItem -Path $reportsDir -Filter "rename-log-*.json" -ErrorAction SilentlyContinue | Sort-Object Name)
-if ($existingLogs.Count -gt 0) {
+# Level 1: rename-state.json
+if (Test-Path $stateFile) {
     try {
-        $prevEntries = @(Get-Content $existingLogs[-1].FullName -Raw | ConvertFrom-Json)
-        $lastGood = $prevEntries | Where-Object { $_.OdometerConfidence -eq 'ok' -or $_.OdometerConfidence -eq 'recovered' } | Select-Object -Last 1
+        $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+        if ($state.Odometer -and $state.DateTimeOriginal) {
+            $lastOdometer     = [int]$state.Odometer
+            $lastGoodDateTime = [datetime]::ParseExact($state.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)
+            $lastGoodLocation = $state.Location
+            Write-Verbose "  Prior state (state file): odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
+        }
+    } catch {
+        Write-Warning "Could not load state file ($stateFile): $($_.Exception.Message)"
+    }
+}
+
+# Level 2: rename-log.json
+if ($null -eq $lastOdometer -and (Test-Path $auditLog)) {
+    try {
+        $lastGood = @(Get-Content $auditLog -Raw | ConvertFrom-Json) |
+            Where-Object { $_.OdometerConfidence -eq 'ok' -or $_.OdometerConfidence -eq 'recovered' } |
+            Select-Object -Last 1
         if ($lastGood) {
             $lastOdometer     = [int]$lastGood.Odometer
             $lastGoodDateTime = [datetime]::ParseExact($lastGood.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)
             $lastGoodLocation = $lastGood.Location
-            Write-Verbose "  Prior state: odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
+            Write-Verbose "  Prior state (audit log): odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
         }
     } catch {
-        Write-Warning "Could not load prior state from $($existingLogs[-1].Name): $($_.Exception.Message)"
+        Write-Warning "Could not load prior state from audit log ($auditLog): $($_.Exception.Message)"
     }
+}
+
+# Level 3: output directory scan
+if ($null -eq $lastOdometer) {
+    try {
+        $lastRenamed = Get-ChildItem -Path $outputFolder -Recurse -Filter "*.jpg" -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -match '^\d{6}-\d{4} ' } |
+            Sort-Object Name |
+            Select-Object -Last 1
+        if ($lastRenamed) {
+            $tokens = $lastRenamed.BaseName -split ' '
+            if ($tokens.Count -ge 3 -and $tokens[-1] -match '^\d+$') {
+                $lastOdometer = [int]$tokens[-1]
+                Write-Verbose "  Prior state (directory scan): odometer=$lastOdometer from $($lastRenamed.Name)"
+            }
+        }
+    } catch {
+        Write-Warning "Directory scan for prior state failed: $($_.Exception.Message)"
+    }
+}
+
+# Level 4: -StartOdometer parameter
+if ($null -eq $lastOdometer -and $PSBoundParameters.ContainsKey('StartOdometer')) {
+    $lastOdometer = $StartOdometer
+    Write-Verbose "  Prior state (StartOdometer): odometer=$lastOdometer"
 }
 
 # ---------------------------------------------------------------------------
 # Data pipeline
 # ---------------------------------------------------------------------------
-$photos = Get-ChildItem -Path $Source -Filter "IMG_*.jpeg"
+$photos = @(Get-ChildItem -Path $Source -Filter "IMG_*.jpeg")
 if ($photos.Count -eq 0) {
     Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
     exit 0
@@ -889,7 +954,7 @@ foreach ($file in $photos) {
     $photo = New-PhotoContext -File $file
 
     # 2. EXIF extraction
-    $exifLines = Get-ExifRawData -ExifToolPath $ExifToolPath -FilePath $file.FullName
+    $exifLines = @(Get-ExifRawData -ExifToolPath $ExifToolPath -FilePath $file.FullName)
     Write-Verbose "  EXIF raw output ($($exifLines.Count) lines): $($exifLines -join ' | ')"
 
     # 3. DateTime enrichment
@@ -910,12 +975,19 @@ foreach ($file in $photos) {
     }
 
     # 6. OCR reading
-    Add-OcrToPhotoContext -Photo $photo
+    Add-OcrToPhotoContext -Photo $photo -OcrScalePct $ocrScalePct
     Write-Verbose "  OCR result: reading=$($photo.OCR.Reading) confidence=$($photo.OCR.Confidence)"
 
     if ($photo.OCR.Confidence -eq 'none' -or $photo.OCR.Confidence -eq 'error') {
         Write-Warning "  OCR $($photo.OCR.Confidence) for $($photo.File.Name) - skipping"
         $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = "OCR: $($photo.OCR.Confidence)" })
+        continue
+    }
+
+    # 6a. Plausibility guard — skip readings that can't fit in Int32 or exceed 9,999,999 mi
+    if ($photo.OCR.Reading -match '^\d+$' -and ($photo.OCR.Reading.Length -gt 7 -or [long]$photo.OCR.Reading -gt 9999999)) {
+        Write-Warning "  OCR reading '$($photo.OCR.Reading)' out of plausible range for $($photo.File.Name) - skipping"
+        $skipped.Add([PSCustomObject]@{ File = $photo.File.Name; Reason = "OCR reading out of range: $($photo.OCR.Reading)" })
         continue
     }
 
@@ -938,7 +1010,8 @@ foreach ($file in $photos) {
     if (-not $newPath) { continue }  # WhatIf
 
     $renamedCount++
-    $logEntries += [PSCustomObject]@{
+
+    $entry = [PSCustomObject]@{
         OriginalFile       = $photo.File.Name
         NewFile            = [System.IO.Path]::GetFileName($newPath)
         DestinationPath    = $newPath
@@ -949,7 +1022,21 @@ foreach ($file in $photos) {
         GPSLat             = $photo.Exif.GPS.Lat
         GPSLon             = $photo.Exif.GPS.Lon
     }
-    $logEntries | ConvertTo-Json | Out-File $logFile -Encoding utf8
+
+    [PSCustomObject]@{
+        Odometer           = $photo.OCR.Reading
+        DateTimeOriginal   = $photo.Exif.RawLines[0]
+        Location           = $photo.Location
+        OdometerConfidence = $photo.OCR.Confidence
+    } | ConvertTo-Json | Out-File $stateFile -Encoding utf8
+
+    $existing = @()
+    if (Test-Path $auditLog) {
+        try { $existing = @(Get-Content $auditLog -Raw | ConvertFrom-Json) } catch {}
+    }
+    $existing = @($existing | Where-Object { $_.OriginalFile -ne $entry.OriginalFile })
+    $existing += $entry
+    ConvertTo-Json -InputObject $existing | Out-File $auditLog -Encoding utf8
 }
 
 $processedCount = @($photos | Where-Object { $_.Name -notmatch '^\d{6}-\d{4} ' }).Count
@@ -963,5 +1050,5 @@ if ($skipped.Count -gt 0) {
         Write-Information "    - $($s.File): $($s.Reason)" -InformationAction Continue
     }
 }
-Write-Information "  Log       : $logFile" -InformationAction Continue
+Write-Information "  Log       : $auditLog" -InformationAction Continue
 Write-Information "[Rename-Photos] Done." -InformationAction Continue
