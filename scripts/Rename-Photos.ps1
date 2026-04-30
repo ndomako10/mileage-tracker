@@ -820,8 +820,10 @@ function Resolve-RelativeSetting {
     return Join-Path (Split-Path $settingsFile -Parent) $raw
 }
 
-$Source = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
-    $paths.Source
+if (-not $PSBoundParameters.ContainsKey('Source')) {
+    $Source = if ($paths -and $paths.PSObject.Properties['Source'] -and $paths.Source) {
+        $paths.Source
+    }
 }
 if (-not $PSBoundParameters.ContainsKey('LocationsJson'))           { $LocationsJson           = Resolve-RelativeSetting 'LocationsJson' }
 if (-not $PSBoundParameters.ContainsKey('ExifToolPath'))            { $ExifToolPath            = Resolve-RelativeSetting 'ExifToolPath' }
