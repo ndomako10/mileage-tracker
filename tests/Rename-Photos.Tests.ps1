@@ -215,12 +215,12 @@ Describe "-WhatIf does not write or move files" -Skip:(-not (Test-Path "$PSScrip
 
     It "exits cleanly and creates no renamed files when source folder is empty" {
         $scriptPath = Join-Path $PSScriptRoot "..\scripts\Rename-Photos.ps1"
-        # Pass -Folder to override settings; with no IMG_*.jpg files the
+        # Pass -Source to override settings; with no IMG_*.jpeg files the
         # script exits before any file operations take place.
         $null = & powershell.exe -NonInteractive -File $scriptPath `
-            -Folder $script:tempSource -WhatIf 2>&1
-        $renamed = Get-ChildItem $script:tempSource -Recurse |
-                   Where-Object { $_.Name -notmatch '^IMG_' -and $_.Extension -eq '.jpg' }
+            -Source $script:tempSource -WhatIf 2>&1
+        $renamed = @(Get-ChildItem $script:tempSource -Recurse |
+                   Where-Object { $_.Name -notmatch '^IMG_' -and $_.Extension -eq '.jpg' })
         $renamed.Count | Should -Be 0
     }
 
