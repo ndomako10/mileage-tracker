@@ -874,6 +874,28 @@ $auditLog  = Join-Path $logsDir "rename-log.json"
 
 Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
 
+# Collect source photos before the fallback chain so temporal filtering is available.
+$photos = @(Get-ChildItem -Path $Source -Filter "IMG_*.jpeg")
+if ($photos.Count -eq 0) {
+    Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
+    exit 0
+}
+
+# Pre-pass: find the earliest EXIF datetime across all source photos.
+# Levels 1-3 of the prior-state fallback chain use this to skip state that is
+# newer than the current batch, which would cause validation to fail on older photos.
+$earliestSourceDate = $null
+$prePassArgs = @('-s3', '-DateTimeOriginal') + ($photos | ForEach-Object { $_.FullName })
+foreach ($raw in (& $ExifToolPath @prePassArgs 2>&1)) {
+    if ($raw -match '^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})') {
+        try {
+            $d = [datetime]::new([int]$Matches[1],[int]$Matches[2],[int]$Matches[3],[int]$Matches[4],[int]$Matches[5],0)
+            if ($null -eq $earliestSourceDate -or $d -lt $earliestSourceDate) { $earliestSourceDate = $d }
+        } catch {}
+    }
+}
+Write-Verbose "  Earliest source photo: $(if ($earliestSourceDate) { $earliestSourceDate } else { '(unknown)' })"
+
 $lastOdometer     = $null
 $lastGoodDateTime = $null
 $lastGoodLocation = $null
@@ -885,10 +907,15 @@ if (Test-Path $stateFile) {
     try {
         $state = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($state.Odometer -and $state.DateTimeOriginal) {
-            $lastOdometer     = [int]$state.Odometer
-            $lastGoodDateTime = [datetime]::ParseExact($state.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)
-            $lastGoodLocation = $state.Location
-            Write-Verbose "  Prior state (state file): odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
+            $stateDateTime = [datetime]::ParseExact($state.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)
+            if ($null -ne $earliestSourceDate -and $stateDateTime -ge $earliestSourceDate) {
+                Write-Verbose "  State file skipped: state datetime ($stateDateTime) is not before earliest source photo ($earliestSourceDate)"
+            } else {
+                $lastOdometer     = [int]$state.Odometer
+                $lastGoodDateTime = $stateDateTime
+                $lastGoodLocation = $state.Location
+                Write-Verbose "  Prior state (state file): odometer=$lastOdometer dateTime=$lastGoodDateTime location=$lastGoodLocation"
+            }
         }
     } catch {
         Write-Warning "Could not load state file ($stateFile): $($_.Exception.Message)"
@@ -900,6 +927,11 @@ if ($null -eq $lastOdometer -and (Test-Path $auditLog)) {
     try {
         $lastGood = @(Get-Content $auditLog -Raw | ConvertFrom-Json) |
             Where-Object { $_.OdometerConfidence -eq 'ok' -or $_.OdometerConfidence -eq 'recovered' } |
+            Where-Object {
+                if ($null -eq $earliestSourceDate) { return $true }
+                try { ([datetime]::ParseExact($_.DateTimeOriginal.Trim(), "yyyy:MM:dd HH:mm:ss", $null)) -lt $earliestSourceDate }
+                catch { $true }
+            } |
             Select-Object -Last 1
         if ($lastGood) {
             $lastOdometer     = [int]$lastGood.Odometer
@@ -917,12 +949,23 @@ if ($null -eq $lastOdometer) {
     try {
         $lastRenamed = Get-ChildItem -Path $outputFolder -Recurse -Filter "*.jpg" -ErrorAction SilentlyContinue |
             Where-Object { $_.BaseName -match '^\d{6}-\d{4} ' } |
+            Where-Object {
+                if ($null -eq $earliestSourceDate) { return $true }
+                if ($_.BaseName -match '^(\d{2})(\d{2})(\d{2})-(\d{2})(\d{2}) ') {
+                    try { [datetime]::new(2000 + [int]$Matches[1],[int]$Matches[2],[int]$Matches[3],[int]$Matches[4],[int]$Matches[5],0) -lt $earliestSourceDate }
+                    catch { $false }
+                } else { $false }
+            } |
             Sort-Object Name |
             Select-Object -Last 1
         if ($lastRenamed) {
             $tokens = $lastRenamed.BaseName -split ' '
             if ($tokens.Count -ge 3 -and $tokens[-1] -match '^\d+$') {
                 $lastOdometer = [int]$tokens[-1]
+                if ($lastRenamed.BaseName -match '^(\d{2})(\d{2})(\d{2})-(\d{2})(\d{2}) ') {
+                    try { $lastGoodDateTime = [datetime]::new(2000 + [int]$Matches[1],[int]$Matches[2],[int]$Matches[3],[int]$Matches[4],[int]$Matches[5],0) }
+                    catch {}
+                }
                 Write-Verbose "  Prior state (directory scan): odometer=$lastOdometer from $($lastRenamed.Name)"
             }
         }
@@ -940,12 +983,6 @@ if ($null -eq $lastOdometer -and $PSBoundParameters.ContainsKey('StartOdometer')
 # ---------------------------------------------------------------------------
 # Data pipeline
 # ---------------------------------------------------------------------------
-$photos = @(Get-ChildItem -Path $Source -Filter "IMG_*.jpeg")
-if ($photos.Count -eq 0) {
-    Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
-    exit 0
-}
-
 foreach ($file in $photos) {
 
     Write-Information "Processing $($file.Name)..." -InformationAction Continue
