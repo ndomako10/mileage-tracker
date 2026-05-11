@@ -3,7 +3,7 @@
     Renames odometer photos using EXIF date/time, GPS-matched location, and OCR odometer reading.
 
 .DESCRIPTION
-    For each IMG_*.jpg in the target folder:
+    For each IMG_*.jpg or IMG_*.jpeg in the target folder:
       1. Reads DateTimeOriginal from EXIF via ExifTool
       2. Reads GPS coordinates from EXIF via ExifTool
       3. Matches GPS to the nearest known location from locations.json
@@ -295,9 +295,14 @@ function Get-OdometerReading {
         Loads the image via WinRT BitmapDecoder, runs it through OcrEngine, and
         selects the longest digit run as the odometer value.
 
-        Decodes the image at a configurable scale percentage before OCR. Downscaling
-        normalises digit size for close-up photos and smooths pixelation artefacts
-        from digital displays. Defaults to 25% (suitable for 4032x3024 source images).
+        Runs up to four OCR passes at 100%, 75%, 50%, and 25% of the original image
+        dimensions, returning on the first pass that yields a digit group of 4 or more
+        characters (confidence "ok"). If no pass reaches that threshold the best
+        low-confidence result is returned; if all passes find no digits at all,
+        confidence is "none".
+
+        EXIF orientation is respected on every pass so iPhone photos are correctly
+        rotated before recognition.
 
         Requires Windows PowerShell 5.1. Returns Confidence="error" immediately
         under PowerShell 6+, which lacks the required WinRT APIs.
@@ -316,8 +321,7 @@ function Get-OdometerReading {
         Digits (string[]), and Error (string) fields.
     #>
     param(
-        [string]$ImagePath,
-        [int]   $ScalePct = 25
+        [string]$ImagePath
     )
 
     $result = [PSCustomObject]@{
@@ -374,37 +378,60 @@ function Get-OdometerReading {
             return $result
         }
 
-        $scale              = [Math]::Min(1.0, $ScalePct / 100.0)
-        $transform              = [Windows.Graphics.Imaging.BitmapTransform]::new()
-        $transform.ScaledWidth  = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelWidth  * $scale))
-        $transform.ScaledHeight = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelHeight * $scale))
-        $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Linear
+        $fallback = $null
 
-        $bitmap = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync(
-            [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
-            [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied,
-            $transform,
-            [Windows.Graphics.Imaging.ExifOrientationMode]::IgnoreExifOrientation,
-            [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
-        )) ([Windows.Graphics.Imaging.SoftwareBitmap])
+        foreach ($scalePct in @(100, 75, 50, 25)) {
+            $scale              = $scalePct / 100.0
+            $transform          = [Windows.Graphics.Imaging.BitmapTransform]::new()
+            $transform.ScaledWidth  = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelWidth  * $scale))
+            $transform.ScaledHeight = [uint32][Math]::Max(1, [Math]::Round($decoder.PixelHeight * $scale))
+            $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Linear
+
+            $bitmap = Invoke-WinRTAsync ($decoder.GetSoftwareBitmapAsync(
+                [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+                [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied,
+                $transform,
+                [Windows.Graphics.Imaging.ExifOrientationMode]::RespectExifOrientation,
+                [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
+            )) ([Windows.Graphics.Imaging.SoftwareBitmap])
+
+            $ocrResult    = Invoke-WinRTAsync ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+            $rawText      = $ocrResult.Text
+            $digitMatches = [regex]::Matches($rawText, '\d+')
+            Write-Verbose "  OCR pass $scalePct%: '$rawText'"
+
+            if ($digitMatches.Count -eq 0) { continue }
+
+            $digits = @($digitMatches | ForEach-Object { $_.Value })
+            $best   = $digitMatches | Sort-Object Length | Select-Object -Last 1
+
+            if ($best.Length -ge 4) {
+                $winStream.Dispose()
+                $netStream.Dispose()
+                $result.Reading    = $best.Value
+                $result.Confidence = 'ok'
+                $result.RawText    = $rawText
+                $result.Digits     = $digits
+                return $result
+            }
+
+            if ($null -eq $fallback) {
+                $fallback = [pscustomobject]@{ Reading = $best.Value; RawText = $rawText; Digits = $digits }
+            }
+        }
 
         $winStream.Dispose()
         $netStream.Dispose()
 
-        $ocrResult  = Invoke-WinRTAsync ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-        $result.RawText = $ocrResult.Text
-
-        $digitMatches = [regex]::Matches($result.RawText, '\d+')
-        if ($digitMatches.Count -eq 0) {
-            $result.Confidence = 'none'
+        if ($null -ne $fallback) {
+            $result.Reading    = $fallback.Reading
+            $result.Confidence = 'low'
+            $result.RawText    = $fallback.RawText
+            $result.Digits     = $fallback.Digits
             return $result
         }
 
-        $result.Digits = @($digitMatches | ForEach-Object { $_.Value })
-        $best = $digitMatches | Sort-Object Length | Select-Object -Last 1
-        $result.Reading    = $best.Value
-        $result.Confidence = if ($best.Length -ge 4) { 'ok' } else { 'low' }
-
+        $result.Confidence = 'none'
         return $result
     }
     catch {
@@ -427,19 +454,14 @@ function Add-OcrToPhotoContext {
     .PARAMETER Photo
         The photo context object created by New-PhotoContext.
 
-    .PARAMETER OcrScalePct
-        Percentage of original image dimensions to decode at before running OCR.
-        Passed through to Get-OdometerReading.
-
     .OUTPUTS
         None. Modifies Photo.OCR in place.
     #>
     param(
-        [pscustomobject]$Photo,
-        [int]           $OcrScalePct = 25
+        [pscustomobject]$Photo
     )
 
-    $result = Get-OdometerReading -ImagePath $Photo.File.FullName -ScalePct $OcrScalePct
+    $result = Get-OdometerReading -ImagePath $Photo.File.FullName
     $Photo.OCR.Reading    = $result.Reading
     $Photo.OCR.Confidence = $result.Confidence
     $Photo.OCR.RawText    = $result.RawText
@@ -831,8 +853,6 @@ if (-not $PSBoundParameters.ContainsKey('ProximityThresholdMiles') -and $setting
 if (-not $PSBoundParameters.ContainsKey('MaxSpeedMph')             -and $settings.ContainsKey('MaxSpeedMph'))             { $MaxSpeedMph             = [double]$settings['MaxSpeedMph'] }
 $roadFactor   = if ($settings.ContainsKey('RoadFactor'))      { [double]$settings['RoadFactor'] }      else { 1.25 }
 $tolerancePct = if ($settings.ContainsKey('TolerancePct'))    { [double]$settings['TolerancePct'] }    else { 0.20 }
-$ocrScalePct  = if ($settings.ContainsKey('OcrScalePercent')) { [int]$settings['OcrScalePercent'] }    else { 25 }
-
 $fallbackLocation = if ($settings.ContainsKey('FallbackLocation') -and $settings['FallbackLocation']) {
     $settings['FallbackLocation']
 } else { "Unknown" }
@@ -877,9 +897,9 @@ $auditLog  = Join-Path $logsDir "rename-log.json"
 Write-Information "[Rename-Photos] Starting - source: $Source" -InformationAction Continue
 
 # Collect source photos before the fallback chain so temporal filtering is available.
-$photos = @(Get-ChildItem -Path $Source -Filter "IMG_*.jpeg")
+$photos = @(Get-ChildItem -Path $Source -File | Where-Object { $_.Name -match '^IMG_.*\.(jpg|jpeg)$' })
 if ($photos.Count -eq 0) {
-    Write-Information "No IMG_*.jpeg files found in $Source" -InformationAction Continue
+    Write-Information "No IMG_*.jpg or IMG_*.jpeg files found in $Source" -InformationAction Continue
     exit 0
 }
 
@@ -1014,7 +1034,7 @@ foreach ($file in $photos) {
     }
 
     # 6. OCR reading
-    Add-OcrToPhotoContext -Photo $photo -OcrScalePct $ocrScalePct
+    Add-OcrToPhotoContext -Photo $photo
     Write-Verbose "  OCR result: reading=$($photo.OCR.Reading) confidence=$($photo.OCR.Confidence)"
 
     if ($photo.OCR.Confidence -eq 'none' -or $photo.OCR.Confidence -eq 'error') {
@@ -1073,9 +1093,14 @@ foreach ($file in $photos) {
     if (Test-Path $auditLog) {
         try { $existing = @(Get-Content $auditLog -Raw | ConvertFrom-Json) } catch {}
     }
-    $existing = @($existing | Where-Object { $_.OriginalFile -ne $entry.OriginalFile })
+    $existing = @($existing | Where-Object { -not $_.PSObject.Properties['OriginalFile'] -or $_.OriginalFile -ne $entry.OriginalFile })
     $existing += $entry
-    ConvertTo-Json -InputObject $existing | Out-File $auditLog -Encoding utf8
+    $auditJson = if ($existing.Count -eq 1) {
+        "[$(ConvertTo-Json -InputObject $existing[0])]"
+    } else {
+        ConvertTo-Json -InputObject $existing
+    }
+    $auditJson | Out-File $auditLog -Encoding utf8
 }
 
 $processedCount = @($photos | Where-Object { $_.Name -notmatch '^\d{6}-\d{4} ' }).Count
